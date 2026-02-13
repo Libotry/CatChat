@@ -199,6 +199,39 @@
             .provider-cards { grid-template-columns: repeat(2,1fr); }
         }
         .mobile-toggle { display: none; width: 40px; height: 40px; border: none; background: none; font-size: 22px; cursor: pointer; margin-right: 12px; border-radius: 8px; align-items: center; justify-content: center; }
+
+        /* Pipeline Panel */
+        .pipeline-panel { margin: 0 20px 12px; padding: 14px; background: linear-gradient(135deg, #0f172a, #1e293b); border-radius: var(--radius-sm); color: white; display: none; }
+        .pipeline-panel.active { display: block; }
+        .pp-title { font-size: 14px; font-weight: 600; margin-bottom: 10px; }
+        .pp-info { font-size: 12px; color: rgba(255,255,255,0.7); margin-bottom: 10px; line-height: 1.5; }
+        .pp-actions { display: flex; gap: 8px; flex-wrap: wrap; }
+        .pp-btn { padding: 8px 14px; border: none; border-radius: 8px; font-size: 12px; font-weight: 600; cursor: pointer; transition: all 0.2s; font-family: inherit; }
+        .pp-btn-start { background: linear-gradient(135deg, #3b82f6, #6366f1); color: white; }
+        .pp-btn-start:hover { box-shadow: 0 4px 12px rgba(99,102,241,0.4); }
+        .pp-btn-reset { background: rgba(255,255,255,0.15); color: white; }
+        .pp-btn:disabled { opacity: 0.4; cursor: not-allowed; }
+        .pp-status { margin-top: 10px; padding: 10px 12px; background: rgba(255,255,255,0.08); border-radius: 8px; font-size: 12px; line-height: 1.8; }
+        .pp-step { display: flex; align-items: center; gap: 8px; margin-bottom: 4px; }
+        .pp-step-badge { display: inline-flex; padding: 2px 10px; border-radius: 12px; font-size: 11px; font-weight: 600; }
+        .pp-step-waiting { background: #475569; color: #94a3b8; }
+        .pp-step-active { background: #3b82f6; color: white; animation: pulse 1.5s infinite; }
+        .pp-step-done { background: #22c55e; color: white; }
+        @keyframes pulse { 0%,100% { opacity:1; } 50% { opacity:0.7; } }
+        .pp-requirement { margin-top: 10px; }
+        .pp-requirement textarea { width: 100%; padding: 10px; border: 1px solid rgba(255,255,255,0.15); border-radius: 8px; background: rgba(255,255,255,0.08); color: white; font-size: 13px; font-family: inherit; resize: vertical; min-height: 80px; outline: none; }
+        .pp-requirement textarea:focus { border-color: #6366f1; }
+        .pp-requirement textarea::placeholder { color: rgba(255,255,255,0.4); }
+        .pp-role-assign { margin-top: 10px; font-size: 12px; color: rgba(255,255,255,0.7); line-height: 1.8; }
+        .pp-role-tag { display: inline-flex; align-items: center; gap: 4px; padding: 2px 10px; border-radius: 12px; font-size: 11px; font-weight: 600; margin-right: 4px; }
+        .pp-role-dev { background: #3b82f6; color: white; }
+        .pp-role-review { background: #f59e0b; color: #1e293b; }
+        .pp-role-test { background: #10b981; color: white; }
+
+        .system-message.pipeline-msg { background: linear-gradient(135deg, #3b82f6, #6366f1); color: white; }
+        .system-message.pipeline-dev-msg { background: linear-gradient(135deg, #2563eb, #4f46e5); color: white; }
+        .system-message.pipeline-review-msg { background: linear-gradient(135deg, #d97706, #f59e0b); color: #1e293b; }
+        .system-message.pipeline-test-msg { background: linear-gradient(135deg, #059669, #10b981); color: white; }
     </style>
 </head>
 <body>
@@ -214,6 +247,7 @@
             <div class="mode-cards">
                 <div class="mode-card active" data-mode="discuss" onclick="switchMode('discuss')"><div class="mode-icon">💬</div><div class="mode-label">讨论模式</div></div>
                 <div class="mode-card" data-mode="werewolf" onclick="switchMode('werewolf')"><div class="mode-icon">🐺</div><div class="mode-label">狼人杀</div></div>
+                <div class="mode-card" data-mode="pipeline" onclick="switchMode('pipeline')"><div class="mode-icon">🏗️</div><div class="mode-label">流水线</div></div>
             </div>
         </div>
         <div class="werewolf-panel" id="werewolfPanel">
@@ -226,6 +260,19 @@
                 <button class="wp-btn wp-btn-end" id="wpEndBtn" onclick="werewolfEnd()" disabled>⏹ 结束游戏</button>
             </div>
             <div class="wp-status" id="wpStatus" style="display:none;"></div>
+        </div>
+        <div class="pipeline-panel" id="pipelinePanel">
+            <div class="pp-title">🏗️ 代码全栈流水线</div>
+            <div class="pp-info">铲屎官提需求 → 猫1设计开发 → 猫2代码检视 → 猫3测试报告</div>
+            <div class="pp-requirement">
+                <textarea id="pipelineRequirement" placeholder="请输入需求详细描述...&#10;例如：用 Python 实现一个 JWT 认证中间件，支持 token 签发、验证和刷新，包含错误处理和日志记录。"></textarea>
+            </div>
+            <div class="pp-role-assign" id="ppRoleAssign"></div>
+            <div class="pp-actions">
+                <button class="pp-btn pp-btn-start" id="ppStartBtn" onclick="pipelineStart()">🚀 启动流水线</button>
+                <button class="pp-btn pp-btn-reset" id="ppResetBtn" onclick="pipelineReset()" disabled>🔄 重置</button>
+            </div>
+            <div class="pp-status" id="ppStatus" style="display:none;"></div>
         </div>
         <button class="add-cat-btn" onclick="openAddCatModal()"><span>➕</span> 添加一只猫猫</button>
         <div class="members-title">成员列表</div>

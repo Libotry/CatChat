@@ -20,6 +20,38 @@ let cats = [], messages = [];
 let selectedEmoji = '🐱', selectedColor = '#f582ae', selectedProvider = 'openai';
 let gameMode = 'discuss', judgeView = true;
 let wfState = { active:false, phase:'idle', round:0, roles:{}, eliminated:[], phaseMessages:[] };
+let plState = { active:false, phase:'idle', requirement:'', roles:{}, results:{} };
+
+// Pipeline role definitions with preset system prompts
+var PIPELINE_ROLES = {
+    developer: {
+        id:'developer', name:'架构师 & 开发工程师', icon:'🛠️', tag:'pp-role-dev',
+        systemPrompt: function(req) {
+            return '你是一位经验丰富的全栈开发工程师和架构师。你的职责是根据需求进行功能模块设计并完成代码开发。\n\n【工作规范】\n1. 先进行模块设计：分析需求，拆解功能模块，给出架构设计方案\n2. 再进行代码实现：输出完整的、可运行的代码\n3. 代码必须包含必要的注释和文档字符串\n4. 考虑边界场景和错误处理\n5. 遵循最佳实践和设计模式\n\n【输出格式】\n请按以下结构输出：\n## 📐 模块设计\n- 架构概述\n- 模块拆解\n- 接口设计\n\n## 💻 代码实现\n(完整的代码)\n\n## 📝 设计说明\n- 关键设计决策\n- 技术选型理由\n\n保持猫咪口吻，可以加入“喵”等语气词，但技术内容必须专业严谨。';
+        },
+        taskPrompt: function(req) {
+            return '【铲屎官需求】\n' + req + '\n\n请开始进行功能模块设计和代码开发。注意架构设计要清晰，代码要完整可运行。';
+        }
+    },
+    reviewer: {
+        id:'reviewer', name:'代码检视专家', icon:'🔍', tag:'pp-role-review',
+        systemPrompt: function(req) {
+            return '你是一位严谨的代码检视专家（Code Reviewer）。你的职责是对开发工程师提交的代码进行全面检视。\n\n【检视规范】\n1. 代码质量：可读性、命名规范、代码风格\n2. 架构设计：模块划分、职责分离、设计模式\n3. 潜在问题：BUG、安全漏洞、性能问题、资源泄漏\n4. 错误处理：异常处理是否完善、边界场景考虑\n5. 最佳实践：是否符合行业规范\n6. 建议改进：提出具体的优化建议和改进方案\n\n【输出格式】\n请按以下结构输出：\n## 🔍 代码检视报告\n\n### ✅ 优点\n(列举代码中做得好的部分)\n\n### ⚠️ 问题与建议\n(按严重程度排序，每个问题给出具体位置和修改建议)\n\n### 🚨 严重问题 (必须修复)\n### 🟡 一般问题 (建议修改)\n### 🟢 小问题 (可以优化)\n\n### 📊 总体评价\n(给出总体评分和结论：通过 / 有条件通过 / 不通过)\n\n保持猫咪口吻但内容必须专业严谹，每个问题要给出具体地方和代码建议。';
+        },
+        taskPrompt: function(req, devOutput) {
+            return '【原始需求】\n' + req + '\n\n【开发工程师提交的代码】\n' + devOutput + '\n\n请对以上代码进行全面的代码检视，给出专业详细的检视报告。';
+        }
+    },
+    tester: {
+        id:'tester', name:'测试工程师', icon:'🧪', tag:'pp-role-test',
+        systemPrompt: function(req) {
+            return '你是一位专业的软件测试工程师（QA Engineer）。你的职责是对开发工程师提交的代码进行全面测试并出具测试报告。\n\n【测试规范】\n1. 单元测试：编写关键函数的单元测试用例\n2. 功能测试：验证核心功能是否符合需求\n3. 边界测试：测试边界条件和异常情况\n4. 安全测试：检查常见安全漏洞\n5. 性能测试：评估基本性能指标\n\n【输出格式】\n请按以下结构输出测试报告：\n## 🧪 测试报告\n\n### 测试环境\n(描述测试预设环境)\n\n### 测试用例\n| 编号 | 测试项 | 输入 | 预期输出 | 结果 |\n|------|----------|------|----------|------|\n(列出具体测试用例)\n\n### 单元测试代码\n(提供可执行的测试代码)\n\n### 缺陷列表\n| 编号 | 严重程度 | 描述 | 复现步骤 |\n|------|----------|------|----------|\n(列出发现的缺陷)\n\n### 📊 测试总结\n- 通过率：XX%\n- 测试结论：通过 / 有条件通过 / 不通过\n- 风险评估\n\n保持猫咪口吻但内容必须专业严谹，测试用例要具体可执行。';
+        },
+        taskPrompt: function(req, devOutput, reviewOutput) {
+            return '【原始需求】\n' + req + '\n\n【开发工程师提交的代码】\n' + devOutput + '\n\n【代码检视意见】\n' + reviewOutput + '\n\n请对以上代码进行全面测试，编写测试用例和测试代码，并出具详细的测试报告。';
+        }
+    }
+};
 
 // ====================== Init ======================
 function init() {
@@ -28,6 +60,7 @@ function init() {
     updateProviderUI('openai');
     renderMembers();
     addSystemMessage('欢迎来到喵星人聊天室！添加你的猫猫，开始聊天吧～ 🐾');
+    pipelineUpdateRoleAssign();
 }
 
 // ====================== Pickers ======================
@@ -83,21 +116,36 @@ function switchMode(mode) {
         if (!confirm('狼人杀进行中，切换将结束游戏。确认？')) return;
         werewolfEnd();
     }
+    if (plState.active && mode !== 'pipeline') {
+        if (!confirm('流水线进行中，切换将重置。确认？')) return;
+        pipelineReset();
+    }
     gameMode = mode;
     document.querySelectorAll('.mode-card').forEach(function(c) { c.classList.remove('active'); });
     document.querySelector('.mode-card[data-mode="' + mode + '"]').classList.add('active');
     var wp = document.getElementById('werewolfPanel');
+    var pp = document.getElementById('pipelinePanel');
     var jt = document.getElementById('judgeToggle');
     if (mode === 'werewolf') {
         wp.classList.add('active');
+        pp.classList.remove('active');
         jt.style.display = 'inline-flex';
         judgeView = true;
         jt.classList.add('active');
         document.getElementById('chatTitle').textContent = '🐺 猫猫大厅 · 狼人杀模式';
         document.getElementById('messageInput').placeholder = '以法官身份发言...';
         addSystemMessage('🐺 已切换到狼人杀模式！铲屎官将担任法官。');
+    } else if (mode === 'pipeline') {
+        wp.classList.remove('active');
+        pp.classList.add('active');
+        jt.style.display = 'none';
+        document.getElementById('chatTitle').textContent = '🏗️ 猫猫大厅 · 代码流水线模式';
+        document.getElementById('messageInput').placeholder = '输入补充需求或反馈...';
+        addSystemMessage('🏗️ 已切换到代码全栈流水线模式！铲屎官当产品经理下需求，猫猫们将依次完成开发、检视、测试。');
+        pipelineUpdateRoleAssign();
     } else {
         wp.classList.remove('active');
+        pp.classList.remove('active');
         jt.style.display = 'none';
         document.getElementById('chatTitle').textContent = '🏠 猫猫大厅 · 讨论模式';
         document.getElementById('messageInput').placeholder = '说点什么吧，猫猫们在等你喵～';
@@ -222,6 +270,147 @@ function refreshWerewolfVisibility() {
     });
 }
 
+// ====================== Pipeline Mode ======================
+function pipelineUpdateRoleAssign() {
+    var el = document.getElementById('ppRoleAssign');
+    if (cats.length < 3) {
+        el.innerHTML = '<div style="color:#f59e0b;margin-top:6px;">⚠️ 至少需要 3 只猫猫！当前：' + cats.length + ' 只</div>';
+        return;
+    }
+    el.innerHTML = '<div style="margin-bottom:4px;font-weight:600;color:white;">角色自动分配：</div>' +
+        '<div class="pp-step"><span class="pp-role-tag pp-role-dev">🛠️ 设计+开发</span> ' + cats[0].emoji + ' ' + escapeHtml(cats[0].name) + '</div>' +
+        '<div class="pp-step"><span class="pp-role-tag pp-role-review">🔍 代码检视</span> ' + cats[1].emoji + ' ' + escapeHtml(cats[1].name) + '</div>' +
+        '<div class="pp-step"><span class="pp-role-tag pp-role-test">🧪 测试报告</span> ' + cats[2].emoji + ' ' + escapeHtml(cats[2].name) + '</div>';
+}
+function pipelineStart() {
+    if (cats.length < 3) { showToast('⚠️ 至少需要 3 只猫猫才能启动流水线！'); return; }
+    var req = document.getElementById('pipelineRequirement').value.trim();
+    if (!req) { showToast('⚠️ 请先输入需求描述！'); return; }
+    plState = {
+        active: true,
+        phase: 'dev',
+        requirement: req,
+        roles: {
+            developer: cats[0],
+            reviewer: cats[1],
+            tester: cats[2]
+        },
+        results: {}
+    };
+    document.getElementById('ppStartBtn').disabled = true;
+    document.getElementById('ppResetBtn').disabled = false;
+    renderMembers();
+    pipelineUpdateStatus();
+    addSystemMessage('🚀 流水线已启动！需求已下发。', 'pipeline-msg');
+    addSystemMessage('📋 需求描述：' + req, 'pipeline-msg');
+    addSystemMessage('🛠️ 阶段一：' + plState.roles.developer.emoji + ' ' + plState.roles.developer.name + ' 正在进行模块设计与代码开发...', 'pipeline-dev-msg');
+    // Trigger developer cat
+    var devCat = plState.roles.developer;
+    var devRole = PIPELINE_ROLES.developer;
+    var devPayload = {
+        system: devCat.personality + '\n\n' + devRole.systemPrompt(req),
+        messages: [{ role:'user', content: devRole.taskPrompt(req) }]
+    };
+    triggerPipelineCatResponse(devCat, devPayload, 'dev');
+}
+function triggerPipelineCatResponse(cat, chatPayload, phase) {
+    addThinkingIndicator(cat);
+    var done = function(reply) {
+        removeThinkingIndicator(cat.id);
+        if (reply) {
+            addCatMessage(cat, reply, false);
+            messages.push({ role:'assistant', name:cat.name, content:reply });
+            plState.results[phase] = reply;
+            pipelineAdvance(phase);
+        } else {
+            addCatMessage(cat, '喵...（猫猫好像没想好说什么）', false);
+        }
+    };
+    var fail = function(err) {
+        removeThinkingIndicator(cat.id);
+        addCatMessage(cat, '😿 喵呜...连接出了问题：' + err.message, false);
+        console.error('[' + cat.name + '] Pipeline API Error:', err);
+    };
+    if (cat.provider === 'claude') {
+        callClaudeAPI(cat, chatPayload).then(done).catch(fail);
+    } else {
+        callOpenAIAPI(cat, chatPayload).then(done).catch(fail);
+    }
+}
+function pipelineAdvance(completedPhase) {
+    if (completedPhase === 'dev') {
+        plState.phase = 'review';
+        pipelineUpdateStatus();
+        addSystemMessage('✅ 设计与开发完成！', 'pipeline-dev-msg');
+        addSystemMessage('🔍 阶段二：' + plState.roles.reviewer.emoji + ' ' + plState.roles.reviewer.name + ' 正在进行代码检视...', 'pipeline-review-msg');
+        var reviewCat = plState.roles.reviewer;
+        var reviewRole = PIPELINE_ROLES.reviewer;
+        setTimeout(function() {
+            var reviewPayload = {
+                system: reviewCat.personality + '\n\n' + reviewRole.systemPrompt(plState.requirement),
+                messages: [{ role:'user', content: reviewRole.taskPrompt(plState.requirement, plState.results.dev) }]
+            };
+            triggerPipelineCatResponse(reviewCat, reviewPayload, 'review');
+        }, 1500);
+    } else if (completedPhase === 'review') {
+        plState.phase = 'test';
+        pipelineUpdateStatus();
+        addSystemMessage('✅ 代码检视完成！', 'pipeline-review-msg');
+        addSystemMessage('🧪 阶段三：' + plState.roles.tester.emoji + ' ' + plState.roles.tester.name + ' 正在编写测试与出具报告...', 'pipeline-test-msg');
+        var testCat = plState.roles.tester;
+        var testRole = PIPELINE_ROLES.tester;
+        setTimeout(function() {
+            var testPayload = {
+                system: testCat.personality + '\n\n' + testRole.systemPrompt(plState.requirement),
+                messages: [{ role:'user', content: testRole.taskPrompt(plState.requirement, plState.results.dev, plState.results.review) }]
+            };
+            triggerPipelineCatResponse(testCat, testPayload, 'test');
+        }, 1500);
+    } else if (completedPhase === 'test') {
+        plState.phase = 'done';
+        pipelineUpdateStatus();
+        addSystemMessage('🎉 流水线全部完成！设计开发 → 代码检视 → 测试报告，全流程已走完喵～', 'pipeline-msg');
+    }
+}
+function pipelineUpdateStatus() {
+    var el = document.getElementById('ppStatus');
+    el.style.display = 'block';
+    var phases = [
+        { key:'dev', label:'🛠️ 设计+开发', cat: plState.roles.developer },
+        { key:'review', label:'🔍 代码检视', cat: plState.roles.reviewer },
+        { key:'test', label:'🧪 测试报告', cat: plState.roles.tester }
+    ];
+    var order = ['dev','review','test','done'];
+    var currentIdx = order.indexOf(plState.phase);
+    var html = '<div style="margin-bottom:6px;font-weight:600;">流水线进度</div>';
+    phases.forEach(function(p, i) {
+        var phaseIdx = order.indexOf(p.key);
+        var status, badgeClass;
+        if (phaseIdx < currentIdx) {
+            status = '✅ 完成';
+            badgeClass = 'pp-step-done';
+        } else if (phaseIdx === currentIdx) {
+            status = '⏳ 进行中';
+            badgeClass = 'pp-step-active';
+        } else {
+            status = '⏸ 等待中';
+            badgeClass = 'pp-step-waiting';
+        }
+        html += '<div class="pp-step"><span class="pp-step-badge ' + badgeClass + '">' + p.label + '</span> ' + (p.cat ? p.cat.emoji + ' ' + escapeHtml(p.cat.name) : '') + ' — ' + status + '</div>';
+    });
+    el.innerHTML = html;
+}
+function pipelineReset() {
+    plState = { active:false, phase:'idle', requirement:'', roles:{}, results:{} };
+    document.getElementById('ppStartBtn').disabled = false;
+    document.getElementById('ppResetBtn').disabled = true;
+    document.getElementById('ppStatus').style.display = 'none';
+    document.getElementById('pipelineRequirement').value = '';
+    renderMembers();
+    addSystemMessage('🔄 流水线已重置，可以开始新的需求。');
+    pipelineUpdateRoleAssign();
+}
+
 // ====================== Modal ======================
 function openAddCatModal() {
     document.getElementById('addCatModal').classList.add('active');
@@ -272,6 +461,7 @@ function addCat() {
     updateOnlineCount();
     addSystemMessage('🎉 ' + cat.emoji + ' ' + cat.name + ' 加入了聊天室！（' + cfg.icon + ' ' + cfg.name + ' · ' + cat.model + '）');
     showToast(cat.emoji + ' ' + cat.name + ' 已加入！');
+    if (gameMode === 'pipeline') pipelineUpdateRoleAssign();
     var intro = buildApiMessages(cat, [{ role:'user', name:'铲屎官', content:'你刚加入聊天室，请简短做一个可爱的自我介绍（不超过50字）。' }], true);
     triggerCatResponse(cat, intro, false);
 }
@@ -282,6 +472,7 @@ function removeCat(catId) {
     renderMembers();
     updateOnlineCount();
     addSystemMessage(cat.emoji + ' ' + cat.name + ' 离开了聊天室');
+    if (gameMode === 'pipeline') pipelineUpdateRoleAssign();
 }
 
 // ====================== Members ======================
@@ -296,6 +487,11 @@ function renderMembers() {
             var dead = wfState.eliminated.includes(cat.id);
             roleHtml = ' <span class="role-badge ' + r.id + '">' + r.icon + ' ' + r.name + '</span>';
             if (dead) roleHtml += ' <span style="color:#e74c3c;font-size:11px;">💀 已淘汰</span>';
+        }
+        if (plState.active && plState.roles) {
+            if (plState.roles.developer && plState.roles.developer.id === cat.id) roleHtml = ' <span class="pp-role-tag pp-role-dev">🛠️ 开发</span>';
+            if (plState.roles.reviewer && plState.roles.reviewer.id === cat.id) roleHtml = ' <span class="pp-role-tag pp-role-review">🔍 检视</span>';
+            if (plState.roles.tester && plState.roles.tester.id === cat.id) roleHtml = ' <span class="pp-role-tag pp-role-test">🧪 测试</span>';
         }
         html += '<div class="member-card"><div class="member-avatar" style="background:linear-gradient(135deg,' + cat.color + ',' + adjustColor(cat.color, -20) + ');">' + cat.emoji + '</div><div class="member-status"></div><div class="member-info"><div class="member-name">' + escapeHtml(cat.name) + '</div><div class="member-role"><span class="provider-badge ' + cat.badgeClass + '">' + PROVIDERS[cat.provider].icon + ' ' + cat.model + '</span>' + roleHtml + '</div></div><button class="member-remove" onclick="removeCat(\'' + cat.id + '\')" title="移除">✕</button></div>';
     });
