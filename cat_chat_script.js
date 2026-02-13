@@ -4,7 +4,8 @@ const catColors = ['#f582ae','#ff8c42','#ffd803','#a8d8a8','#8bd3dd','#b8a9c9','
 const PROVIDERS = {
     openai: { name:'OpenAI',icon:'🟢',defaultUrl:'https://api.openai.com/v1/chat/completions',urlHint:'支持所有 OpenAI 兼容接口',models:['gpt-4o','gpt-4o-mini','gpt-4-turbo','gpt-3.5-turbo','deepseek-chat','qwen-turbo'],defaultModel:'gpt-4o-mini',badgeClass:'openai' },
     claude: { name:'Claude',icon:'🟠',defaultUrl:'https://api.anthropic.com/v1/messages',urlHint:'Anthropic 官方或代理地址',models:['claude-sonnet-4-20250514','claude-haiku-4-20250414','claude-3-5-sonnet-20241022','claude-3-opus-20240229'],defaultModel:'claude-sonnet-4-20250514',badgeClass:'claude' },
-    glm: { name:'GLM',icon:'🔵',defaultUrl:'https://open.bigmodel.cn/api/paas/v4/chat/completions',urlHint:'智谱 AI 开放平台',models:['glm-4-plus','glm-4-flash','glm-4-air','glm-4-long','glm-4'],defaultModel:'glm-4-flash',badgeClass:'glm' }
+    glm: { name:'GLM',icon:'🔵',defaultUrl:'https://open.bigmodel.cn/api/paas/v4/chat/completions',urlHint:'智谱 AI 开放平台',models:['glm-4-plus','glm-4-flash','glm-4-air','glm-4-long','glm-4'],defaultModel:'glm-4-flash',badgeClass:'glm' },
+    siliconflow: { name:'硅基流动',icon:'🟣',defaultUrl:'https://api.siliconflow.cn/v1/chat/completions',urlHint:'SiliconFlow OpenAI 兼容接口',models:['Pro/zai-org/GLM-4.7','deepseek-ai/DeepSeek-V3','Qwen/Qwen2.5-72B-Instruct','THUDM/glm-4-9b-chat'],defaultModel:'Pro/zai-org/GLM-4.7',badgeClass:'siliconflow' }
 };
 const WEREWOLF_ROLES = [
     { id:'werewolf',name:'狼人',icon:'🐺',team:'wolf',desc:'每晚可以选择猎杀一名玩家' },
@@ -21,6 +22,8 @@ let selectedEmoji = '🐱', selectedColor = '#f582ae', selectedProvider = 'opena
 let gameMode = 'discuss', judgeView = true;
 let wfState = { active:false, phase:'idle', round:0, roles:{}, eliminated:[], phaseMessages:[] };
 let plState = { active:false, phase:'idle', requirement:'', roles:{}, results:{} };
+let cliProxy = { enabled: false, url: 'http://localhost:3456', connected: false };
+let dbState = { active:false, round:0, maxRounds:2, turnIndex:0, order:[], queue:[], speaking:false };
 
 // Pipeline role definitions with preset system prompts
 var PIPELINE_ROLES = {
@@ -120,13 +123,28 @@ function switchMode(mode) {
         if (!confirm('流水线进行中，切换将重置。确认？')) return;
         pipelineReset();
     }
+    if (dbState.active && mode !== 'debate') {
+        if (!confirm('辩论赛进行中，切换将结束辩论。确认？')) return;
+        debateEnd();
+    }
     gameMode = mode;
     document.querySelectorAll('.mode-card').forEach(function(c) { c.classList.remove('active'); });
     document.querySelector('.mode-card[data-mode="' + mode + '"]').classList.add('active');
     var wp = document.getElementById('werewolfPanel');
     var pp = document.getElementById('pipelinePanel');
+    var dp = document.getElementById('debatePanel');
     var jt = document.getElementById('judgeToggle');
-    if (mode === 'werewolf') {
+    if (mode === 'debate') {
+        dp.classList.add('active');
+        wp.classList.remove('active');
+        pp.classList.remove('active');
+        jt.style.display = 'none';
+        document.getElementById('chatTitle').textContent = '🎯 猫猫大厅 · 辩论赛模式';
+        document.getElementById('messageInput').placeholder = '输入辩题，猫猫们将轮流发言...';
+        addSystemMessage('🎯 已切换到辩论赛模式！铲屎官出题，猫猫按顺序轮流发言。');
+        debateUpdateOrder();
+    } else if (mode === 'werewolf') {
+        dp.classList.remove('active');
         wp.classList.add('active');
         pp.classList.remove('active');
         jt.style.display = 'inline-flex';
@@ -136,6 +154,7 @@ function switchMode(mode) {
         document.getElementById('messageInput').placeholder = '以法官身份发言...';
         addSystemMessage('🐺 已切换到狼人杀模式！铲屎官将担任法官。');
     } else if (mode === 'pipeline') {
+        dp.classList.remove('active');
         wp.classList.remove('active');
         pp.classList.add('active');
         jt.style.display = 'none';
@@ -144,6 +163,7 @@ function switchMode(mode) {
         addSystemMessage('🏗️ 已切换到代码全栈流水线模式！铲屎官当产品经理下需求，猫猫们将依次完成开发、检视、测试。');
         pipelineUpdateRoleAssign();
     } else {
+        dp.classList.remove('active');
         wp.classList.remove('active');
         pp.classList.remove('active');
         jt.style.display = 'none';
@@ -270,6 +290,214 @@ function refreshWerewolfVisibility() {
     });
 }
 
+// ====================== Debate Mode ======================
+function debateUpdateOrder() {
+    var container = document.getElementById('debateOrder');
+    if (!container) return;
+    // Sync order with current cats
+    dbState.order = cats.map(function(c) { return c.id; });
+    if (cats.length < 2) {
+        container.innerHTML = '<div style="font-size:12px;color:rgba(255,255,255,0.5);padding:8px 0;">至少需要 2 只猫猫参加辩论</div>';
+        return;
+    }
+    container.innerHTML = dbState.order.map(function(catId, idx) {
+        var cat = cats.find(function(c) { return c.id === catId; });
+        if (!cat) return '';
+        var cls = 'db-order-item';
+        if (dbState.active && idx === dbState.turnIndex) cls += ' speaking';
+        if (dbState.active && idx < dbState.turnIndex) cls += ' done';
+        return '<div class="' + cls + '" draggable="true" data-cat-id="' + catId + '" ondragstart="debateDragStart(event)" ondragover="debateDragOver(event)" ondrop="debateDrop(event)">' +
+            '<div class="db-order-num">' + (idx + 1) + '</div>' +
+            '<span>' + cat.emoji + ' ' + escapeHtml(cat.name) + '</span>' +
+            '</div>';
+    }).join('');
+}
+
+// Drag & drop reorder
+var debateDraggedId = null;
+function debateDragStart(e) {
+    if (dbState.active) { e.preventDefault(); return; }
+    debateDraggedId = e.target.closest('.db-order-item').dataset.catId;
+    e.dataTransfer.effectAllowed = 'move';
+}
+function debateDragOver(e) {
+    e.preventDefault();
+    e.dataTransfer.dropEffect = 'move';
+}
+function debateDrop(e) {
+    e.preventDefault();
+    if (dbState.active) return;
+    var targetId = e.target.closest('.db-order-item').dataset.catId;
+    if (!debateDraggedId || !targetId || debateDraggedId === targetId) return;
+    var fromIdx = dbState.order.indexOf(debateDraggedId);
+    var toIdx = dbState.order.indexOf(targetId);
+    if (fromIdx === -1 || toIdx === -1) return;
+    dbState.order.splice(fromIdx, 1);
+    dbState.order.splice(toIdx, 0, debateDraggedId);
+    debateUpdateOrder();
+    debateDraggedId = null;
+}
+
+function debateStart() {
+    if (cats.length < 2) { showToast('⚠️ 至少需要 2 只猫猫参加辩论！'); return; }
+    var maxR = parseInt(document.getElementById('debateRounds').value, 10);
+    dbState.maxRounds = maxR;
+    dbState.active = true;
+    dbState.round = 0;
+    dbState.turnIndex = 0;
+    dbState.speaking = false;
+    dbState.queue = [];
+    // Ensure order exists
+    if (dbState.order.length === 0) dbState.order = cats.map(function(c) { return c.id; });
+    document.getElementById('dbStartBtn').disabled = true;
+    document.getElementById('dbNextBtn').disabled = false;
+    document.getElementById('dbEndBtn').disabled = false;
+    var names = dbState.order.map(function(id) {
+        var c = cats.find(function(x) { return x.id === id; });
+        return c ? c.emoji + c.name : '';
+    }).join(' → ');
+    addSystemMessage('🎯 辩论赛开始！发言顺序：' + names, 'debate-msg');
+    addSystemMessage('💡 铲屎官请输入辩题，猫猫们将按顺序轮流发言。', 'debate-msg');
+    var roundLabel = maxR === 0 ? '无限轮' : maxR + ' 轮';
+    addSystemMessage('📋 辩论设置：' + cats.length + ' 位辩手 · ' + roundLabel, 'debate-msg');
+    debateUpdateStatus();
+    debateUpdateOrder();
+}
+
+function debateEnd() {
+    if (dbState.active) {
+        addSystemMessage('🏁 辩论赛结束！感谢各位猫猫精彩的发言！', 'debate-msg');
+    }
+    dbState.active = false;
+    dbState.speaking = false;
+    dbState.round = 0;
+    dbState.turnIndex = 0;
+    dbState.queue = [];
+    document.getElementById('dbStartBtn').disabled = false;
+    document.getElementById('dbNextBtn').disabled = true;
+    document.getElementById('dbEndBtn').disabled = true;
+    var st = document.getElementById('dbStatus');
+    st.style.display = 'none';
+    debateUpdateOrder();
+}
+
+function debateUpdateStatus() {
+    var st = document.getElementById('dbStatus');
+    st.style.display = 'block';
+    var currentCat = null;
+    if (dbState.turnIndex < dbState.order.length) {
+        var cid = dbState.order[dbState.turnIndex];
+        currentCat = cats.find(function(c) { return c.id === cid; });
+    }
+    var roundLabel = dbState.maxRounds === 0 ? '∞' : dbState.maxRounds;
+    var html = '<span class="db-round-badge">第 ' + dbState.round + '/' + roundLabel + ' 轮</span>';
+    if (currentCat) {
+        html += '<div class="db-turn-indicator">' + currentCat.emoji + ' <strong>' + escapeHtml(currentCat.name) + '</strong> ';
+        html += dbState.speaking ? '正在发言...' : '准备发言';
+        html += '</div>';
+    }
+    // Progress bar
+    var total = dbState.order.length;
+    var done = dbState.turnIndex;
+    html += '<div style="margin-top:8px;background:rgba(255,255,255,0.15);border-radius:4px;height:6px;overflow:hidden;">';
+    html += '<div style="width:' + (total > 0 ? (done / total * 100) : 0) + '%;height:100%;background:#f59e0b;border-radius:4px;transition:width 0.3s;"></div></div>';
+    html += '<div style="font-size:11px;color:rgba(255,255,255,0.5);margin-top:4px;">本轮进度 ' + done + '/' + total + '</div>';
+    st.innerHTML = html;
+}
+
+function debateTriggerNextSpeaker() {
+    if (!dbState.active) return;
+    // Check if current round is complete
+    if (dbState.turnIndex >= dbState.order.length) {
+        dbState.round++;
+        // Check if max rounds reached
+        if (dbState.maxRounds > 0 && dbState.round > dbState.maxRounds) {
+            addSystemMessage('🏁 所有辩论轮次已结束！', 'debate-msg');
+            debateEnd();
+            return;
+        }
+        dbState.turnIndex = 0;
+        addSystemMessage('🔄 第 ' + dbState.round + ' 轮辩论开始！', 'debate-turn-msg');
+    }
+    debateUpdateStatus();
+    debateUpdateOrder();
+    // Get current speaker
+    var catId = dbState.order[dbState.turnIndex];
+    var cat = cats.find(function(c) { return c.id === catId; });
+    if (!cat) {
+        // Cat removed, skip
+        dbState.turnIndex++;
+        debateTriggerNextSpeaker();
+        return;
+    }
+    dbState.speaking = true;
+    debateUpdateStatus();
+    addSystemMessage('🎙️ 请 ' + cat.emoji + ' ' + escapeHtml(cat.name) + ' 发言（第 ' + dbState.round + ' 轮 · 第 ' + (dbState.turnIndex + 1) + ' 位）', 'debate-turn-msg');
+    // Build debate-aware payload
+    var debateSystem = cat.personality + '\n\n【辩论赛规则】\n- 你正在参加一场辩论赛，有 ' + cats.length + ' 位辩手参加。\n- 当前是第 ' + dbState.round + ' 轮辩论，你是第 ' + (dbState.turnIndex + 1) + ' 个发言。\n- 请针对辩题和前面辩手的发言，给出你的观点和论据。\n- 可以反驳前面辩手的观点，也可以补充新论点。\n- 发言控制在 80-200 字左右，逻辑清晰、观点鲜明。\n- 保持猫咪口吻，但论点要有说服力。';
+    var history = messages.slice(-30).map(function(m) {
+        return { role: m.name === cat.name ? 'assistant' : 'user', content: '[' + m.name + ']: ' + m.content };
+    });
+    var payload = { system: debateSystem, messages: history };
+    // Trigger the single cat response with callback for next
+    debateTriggerCatResponse(cat, payload);
+}
+
+function debateTriggerCatResponse(cat, chatPayload) {
+    addThinkingIndicator(cat);
+    var done = function(reply) {
+        removeThinkingIndicator(cat.id);
+        if (reply) {
+            addCatMessage(cat, reply, false);
+            messages.push({ role:'assistant', name:cat.name, content:reply });
+        } else {
+            addCatMessage(cat, '喵...（猫猫好像没想好说什么）', false);
+        }
+        // Advance to next speaker
+        dbState.speaking = false;
+        dbState.turnIndex++;
+        debateUpdateStatus();
+        debateUpdateOrder();
+        // Auto-trigger next with a short delay
+        if (dbState.active) {
+            setTimeout(function() {
+                debateTriggerNextSpeaker();
+            }, 1200);
+        }
+    };
+    var fail = function(err) {
+        removeThinkingIndicator(cat.id);
+        var msg = err.message;
+        if (err instanceof TypeError && (msg === 'Failed to fetch' || msg.indexOf('NetworkError') !== -1 || msg.indexOf('fetch') !== -1)) {
+            msg = '网络连接失败，可能是浏览器 CORS 跨域限制。请检查 API 地址或启用 CLI 代理。';
+        }
+        addCatMessage(cat, '😿 喵呜...连接出了问题：' + msg, false);
+        console.error('[' + cat.name + '] Debate API Error:', err);
+        // Still advance even on error
+        dbState.speaking = false;
+        dbState.turnIndex++;
+        debateUpdateStatus();
+        debateUpdateOrder();
+        if (dbState.active) {
+            setTimeout(function() { debateTriggerNextSpeaker(); }, 1500);
+        }
+    };
+    if (cat.provider === 'claude') {
+        callClaudeAPI(cat, chatPayload).then(done).catch(fail);
+    } else {
+        callOpenAIAPI(cat, chatPayload).then(done).catch(fail);
+    }
+}
+
+function debateForceNext() {
+    if (!dbState.active) return;
+    if (dbState.speaking) {
+        showToast('⏳ 当前猫猫正在发言，请等待...');
+        return;
+    }
+    debateTriggerNextSpeaker();
+}
+
 // ====================== Pipeline Mode ======================
 function pipelineUpdateRoleAssign() {
     var el = document.getElementById('ppRoleAssign');
@@ -328,7 +556,11 @@ function triggerPipelineCatResponse(cat, chatPayload, phase) {
     };
     var fail = function(err) {
         removeThinkingIndicator(cat.id);
-        addCatMessage(cat, '😿 喵呜...连接出了问题：' + err.message, false);
+        var msg = err.message;
+        if (err instanceof TypeError && (msg === 'Failed to fetch' || msg.indexOf('NetworkError') !== -1 || msg.indexOf('fetch') !== -1)) {
+            msg = '网络连接失败，可能是浏览器 CORS 跨域限制（该 API 不支持浏览器直接调用）。请检查 API 地址是否正确，或尝试使用支持 CORS 的 API 代理地址。';
+        }
+        addCatMessage(cat, '😿 喵呜...连接出了问题：' + msg, false);
         console.error('[' + cat.name + '] Pipeline API Error:', err);
     };
     if (cat.provider === 'claude') {
@@ -434,6 +666,24 @@ function resetForm() {
 }
 
 // ====================== Add / Remove Cat ======================
+function normalizeApiUrl(url, provider) {
+    if (!url) return '';
+    // Remove trailing slash
+    url = url.replace(/\/+$/, '');
+    // If the URL already contains the expected path, return as-is
+    if (provider === 'claude') {
+        if (!/\/v1\/messages$/i.test(url)) {
+            url += '/v1/messages';
+        }
+    } else {
+        // OpenAI / GLM compatible
+        if (!/\/v1\/chat\/completions$/i.test(url) && !/\/chat\/completions$/i.test(url)) {
+            url += '/v1/chat/completions';
+        }
+    }
+    return url;
+}
+
 function addCat() {
     var name = document.getElementById('catName').value.trim();
     if (!name) { showToast('⚠️ 请给猫猫取个名字！'); return; }
@@ -441,6 +691,8 @@ function addCat() {
     var gModel = document.getElementById('globalModel').value.trim();
     var provider = selectedProvider;
     var cfg = PROVIDERS[provider];
+    var rawUrl = document.getElementById('catApiUrl').value.trim();
+    var apiUrl = rawUrl ? normalizeApiUrl(rawUrl, provider) : cfg.defaultUrl;
     var cat = {
         id: Date.now().toString(),
         name: name,
@@ -448,7 +700,7 @@ function addCat() {
         color: selectedColor,
         personality: document.getElementById('catPersonality').value.trim() || '你是一只叫"' + name + '"的猫咪。用猫咪口吻说话，适当加入"喵"等语气词。你有自己的想法和情绪。',
         provider: provider,
-        apiUrl: document.getElementById('catApiUrl').value.trim() || cfg.defaultUrl,
+        apiUrl: apiUrl,
         apiKey: document.getElementById('catApiKey').value.trim() || gKey || '',
         model: document.getElementById('catModel').value.trim() || gModel || cfg.defaultModel,
         claudeVersion: document.getElementById('claudeApiVersion').value.trim() || '2023-06-01',
@@ -462,6 +714,7 @@ function addCat() {
     addSystemMessage('🎉 ' + cat.emoji + ' ' + cat.name + ' 加入了聊天室！（' + cfg.icon + ' ' + cfg.name + ' · ' + cat.model + '）');
     showToast(cat.emoji + ' ' + cat.name + ' 已加入！');
     if (gameMode === 'pipeline') pipelineUpdateRoleAssign();
+    if (gameMode === 'debate') debateUpdateOrder();
     var intro = buildApiMessages(cat, [{ role:'user', name:'铲屎官', content:'你刚加入聊天室，请简短做一个可爱的自我介绍（不超过50字）。' }], true);
     triggerCatResponse(cat, intro, false);
 }
@@ -473,6 +726,10 @@ function removeCat(catId) {
     updateOnlineCount();
     addSystemMessage(cat.emoji + ' ' + cat.name + ' 离开了聊天室');
     if (gameMode === 'pipeline') pipelineUpdateRoleAssign();
+    if (gameMode === 'debate') {
+        dbState.order = dbState.order.filter(function(id) { return id !== catId; });
+        debateUpdateOrder();
+    }
 }
 
 // ====================== Members ======================
@@ -493,7 +750,7 @@ function renderMembers() {
             if (plState.roles.reviewer && plState.roles.reviewer.id === cat.id) roleHtml = ' <span class="pp-role-tag pp-role-review">🔍 检视</span>';
             if (plState.roles.tester && plState.roles.tester.id === cat.id) roleHtml = ' <span class="pp-role-tag pp-role-test">🧪 测试</span>';
         }
-        html += '<div class="member-card"><div class="member-avatar" style="background:linear-gradient(135deg,' + cat.color + ',' + adjustColor(cat.color, -20) + ');">' + cat.emoji + '</div><div class="member-status"></div><div class="member-info"><div class="member-name">' + escapeHtml(cat.name) + '</div><div class="member-role"><span class="provider-badge ' + cat.badgeClass + '">' + PROVIDERS[cat.provider].icon + ' ' + cat.model + '</span>' + roleHtml + '</div></div><button class="member-remove" onclick="removeCat(\'' + cat.id + '\')" title="移除">✕</button></div>';
+        html += '<div class="member-card"><div class="member-avatar" style="background:linear-gradient(135deg,' + cat.color + ',' + adjustColor(cat.color, -20) + ');" onmouseenter="showCatTooltip(\'' + cat.id + '\',event)" onmouseleave="hideCatTooltip()">' + cat.emoji + '</div><div class="member-status"></div><div class="member-info"><div class="member-name">' + escapeHtml(cat.name) + '</div><div class="member-role"><span class="provider-badge ' + cat.badgeClass + '">' + PROVIDERS[cat.provider].icon + ' ' + cat.model + '</span>' + roleHtml + '</div></div><button class="member-remove" onclick="removeCat(\'' + cat.id + '\')" title="移除">✕</button></div>';
     });
     list.innerHTML = html;
 }
@@ -529,7 +786,7 @@ function addCatMessage(cat, text, isNight) {
     }
     var displayText = d.classList.contains('message-hidden') ? '🔒 [发言已隐藏]' : escapeHtml(text);
     var nightLabel = isNight ? ' 🌙' : '';
-    d.innerHTML = '<div class="message-avatar" style="background:linear-gradient(135deg,' + cat.color + ',' + adjustColor(cat.color, -20) + ');">' + cat.emoji + '</div><div class="message-content"><div class="message-sender">' + escapeHtml(cat.name) + nightLabel + '</div><div class="message-bubble" data-real="' + escapeHtml(text) + '">' + displayText + '</div><div class="message-time">' + getTimeStr() + '</div></div>';
+    d.innerHTML = '<div class="message-avatar" style="background:linear-gradient(135deg,' + cat.color + ',' + adjustColor(cat.color, -20) + ');" onmouseenter="showCatTooltip(\'' + cat.id + '\',event)" onmouseleave="hideCatTooltip()">' + cat.emoji + '</div><div class="message-content"><div class="message-sender">' + escapeHtml(cat.name) + nightLabel + '</div><div class="message-bubble" data-real="' + escapeHtml(text) + '">' + displayText + '</div><div class="message-time">' + getTimeStr() + '</div></div>';
     document.getElementById('chatMessages').appendChild(d);
     scrollToBottom();
 }
@@ -537,7 +794,7 @@ function addThinkingIndicator(cat) {
     var d = document.createElement('div');
     d.className = 'message cat-message';
     d.id = 'thinking-' + cat.id;
-    d.innerHTML = '<div class="message-avatar" style="background:linear-gradient(135deg,' + cat.color + ',' + adjustColor(cat.color, -20) + ');">' + cat.emoji + '</div><div class="message-content"><div class="message-sender">' + escapeHtml(cat.name) + '</div><div class="message-thinking"><span>' + escapeHtml(cat.name) + ' 正在思考</span><div class="thinking-dots"><span></span><span></span><span></span></div></div></div>';
+    d.innerHTML = '<div class="message-avatar" style="background:linear-gradient(135deg,' + cat.color + ',' + adjustColor(cat.color, -20) + ');" onmouseenter="showCatTooltip(\'' + cat.id + '\',event)" onmouseleave="hideCatTooltip()">' + cat.emoji + '</div><div class="message-content"><div class="message-sender">' + escapeHtml(cat.name) + '</div><div class="message-thinking"><span>' + escapeHtml(cat.name) + ' 正在思考</span><div class="thinking-dots"><span></span><span></span><span></span></div></div></div>';
     document.getElementById('chatMessages').appendChild(d);
     scrollToBottom();
 }
@@ -559,8 +816,48 @@ function sendMessage() {
         addSystemMessage('💡 还没有猫猫加入呢～点击左侧「添加一只猫猫」按钮吧！');
         return;
     }
+    // Debate mode: sequential speaking
+    if (gameMode === 'debate') {
+        if (dbState.speaking) {
+            showToast('⏳ 猫猫正在发言中，请等待...');
+            return;
+        }
+        if (!dbState.active) {
+            // Auto-start debate on first message
+            if (cats.length < 2) {
+                addSystemMessage('⚠️ 至少需要 2 只猫猫才能辩论！');
+                return;
+            }
+            var maxR = parseInt(document.getElementById('debateRounds').value, 10);
+            dbState.maxRounds = maxR;
+            dbState.active = true;
+            dbState.round = 0;
+            dbState.turnIndex = 0;
+            dbState.speaking = false;
+            if (dbState.order.length === 0) dbState.order = cats.map(function(c) { return c.id; });
+            document.getElementById('dbStartBtn').disabled = true;
+            document.getElementById('dbNextBtn').disabled = false;
+            document.getElementById('dbEndBtn').disabled = false;
+            var names = dbState.order.map(function(id) {
+                var c = cats.find(function(x) { return x.id === id; });
+                return c ? c.emoji + c.name : '';
+            }).join(' → ');
+            addSystemMessage('🎯 辩论赛自动开始！发言顺序：' + names, 'debate-msg');
+        }
+        // Start a new round of sequential responses
+        dbState.turnIndex = 0;
+        dbState.round++;
+        addSystemMessage('📢 第 ' + dbState.round + ' 轮辩论开始 — 辩题：' + text, 'debate-turn-msg');
+        debateUpdateStatus();
+        debateUpdateOrder();
+        setTimeout(function() { debateTriggerNextSpeaker(); }, 600);
+        return;
+    }
     var isNight = (gameMode === 'werewolf' && wfState.active && wfState.phase === 'night');
-    cats.forEach(function(cat, idx) {
+    // Parse @mentions — if any @catname found, only those cats respond
+    var mentionedCats = parseMentions(text);
+    var respondingCats = mentionedCats.length > 0 ? mentionedCats : cats;
+    respondingCats.forEach(function(cat, idx) {
         if (wfState.active && wfState.eliminated.includes(cat.id)) return;
         setTimeout(function() {
             var payload;
@@ -577,6 +874,16 @@ function sendMessage() {
 }
 
 // ====================== Build API Messages ======================
+function parseMentions(text) {
+    var mentioned = [];
+    cats.forEach(function(cat) {
+        if (text.indexOf('@' + cat.name) !== -1) {
+            mentioned.push(cat);
+        }
+    });
+    return mentioned;
+}
+
 function buildApiMessages(cat, msgHistory, isIntro) {
     var systemContent = cat.personality + '\n\n【聊天室规则】\n- 你在一个有多只猫猫和铲屎官的聊天室里。\n- 请用简短自然的口吻回复（30-100字左右）。\n- 可以用"喵"等语气词，但不要每句话都用。\n- 保持自己的性格特点。';
     var history = (isIntro ? msgHistory : msgHistory.slice(-20)).map(function(m) {
@@ -599,7 +906,11 @@ function triggerCatResponse(cat, chatPayload, isNight) {
     };
     var fail = function(err) {
         removeThinkingIndicator(cat.id);
-        addCatMessage(cat, '😿 喵呜...连接出了问题：' + err.message, false);
+        var msg = err.message;
+        if (err instanceof TypeError && (msg === 'Failed to fetch' || msg.indexOf('NetworkError') !== -1 || msg.indexOf('fetch') !== -1)) {
+            msg = '网络连接失败，可能是浏览器 CORS 跨域限制（该 API 不支持浏览器直接调用）。请检查 API 地址是否正确，或尝试使用支持 CORS 的 API 代理地址。';
+        }
+        addCatMessage(cat, '😿 喵呜...连接出了问题：' + msg, false);
         console.error('[' + cat.name + '] API Error:', err);
     };
     if (cat.provider === 'claude') {
@@ -617,7 +928,7 @@ function callOpenAIAPI(cat, payload) {
         max_tokens: 300,
         temperature: 0.85
     };
-    return fetch(cat.apiUrl, {
+    return proxyFetch(cat.apiUrl, {
         method: 'POST',
         headers: { 'Content-Type':'application/json', 'Authorization':'Bearer ' + cat.apiKey },
         body: JSON.stringify(body)
@@ -654,7 +965,7 @@ function callClaudeAPI(cat, payload) {
         lastRole = m.role;
     });
     var body = { model:cat.model, max_tokens:300, system:payload.system, messages:final };
-    return fetch(cat.apiUrl, {
+    return proxyFetch(cat.apiUrl, {
         method: 'POST',
         headers: {
             'Content-Type':'application/json',
@@ -677,8 +988,107 @@ function callClaudeAPI(cat, payload) {
 }
 
 // ====================== Helpers ======================
+var mentionActive = false, mentionIndex = 0, mentionFiltered = [];
+
 function handleInputKeydown(e) {
+    if (mentionActive) {
+        if (e.key === 'ArrowDown') {
+            e.preventDefault();
+            mentionIndex = (mentionIndex + 1) % mentionFiltered.length;
+            renderMentionPopup(mentionFiltered);
+            return;
+        }
+        if (e.key === 'ArrowUp') {
+            e.preventDefault();
+            mentionIndex = (mentionIndex - 1 + mentionFiltered.length) % mentionFiltered.length;
+            renderMentionPopup(mentionFiltered);
+            return;
+        }
+        if (e.key === 'Enter' || e.key === 'Tab') {
+            e.preventDefault();
+            if (mentionFiltered.length > 0) {
+                selectMention(mentionFiltered[mentionIndex]);
+            }
+            return;
+        }
+        if (e.key === 'Escape') {
+            e.preventDefault();
+            closeMentionPopup();
+            return;
+        }
+    }
     if (e.key === 'Enter' && !e.shiftKey) { e.preventDefault(); sendMessage(); }
+}
+
+function handleInputChange(textarea) {
+    autoResize(textarea);
+    checkMention(textarea);
+}
+
+function checkMention(textarea) {
+    var val = textarea.value;
+    var pos = textarea.selectionStart;
+    // Find the @ symbol before cursor
+    var before = val.substring(0, pos);
+    var atIdx = before.lastIndexOf('@');
+    if (atIdx === -1 || (atIdx > 0 && before[atIdx - 1] !== ' ' && before[atIdx - 1] !== '\n')) {
+        closeMentionPopup();
+        return;
+    }
+    var query = before.substring(atIdx + 1).toLowerCase();
+    // If there's a space after the query started, close
+    if (query.indexOf(' ') !== -1 && query.indexOf(' ') < query.length - 1) {
+        closeMentionPopup();
+        return;
+    }
+    mentionFiltered = cats.filter(function(c) {
+        return c.name.toLowerCase().indexOf(query) !== -1;
+    });
+    if (mentionFiltered.length === 0) {
+        closeMentionPopup();
+        return;
+    }
+    mentionActive = true;
+    mentionIndex = 0;
+    renderMentionPopup(mentionFiltered);
+}
+
+function renderMentionPopup(list) {
+    var popup = document.getElementById('mentionPopup');
+    popup.innerHTML = list.map(function(cat, idx) {
+        return '<div class="mention-item' + (idx === mentionIndex ? ' active' : '') + '" onmousedown="selectMention(cats.find(function(c){return c.id===\'' + cat.id + '\'}))">'
+            + '<div class="mention-avatar" style="background:linear-gradient(135deg,' + cat.color + ',' + adjustColor(cat.color, -20) + ');">' + cat.emoji + '</div>'
+            + '<span class="mention-name">' + escapeHtml(cat.name) + '</span>'
+            + '<span class="mention-model">' + escapeHtml(cat.model) + '</span>'
+            + '</div>';
+    }).join('');
+    popup.classList.add('active');
+}
+
+function selectMention(cat) {
+    if (!cat) return;
+    var textarea = document.getElementById('messageInput');
+    var val = textarea.value;
+    var pos = textarea.selectionStart;
+    var before = val.substring(0, pos);
+    var atIdx = before.lastIndexOf('@');
+    if (atIdx === -1) return;
+    var after = val.substring(pos);
+    var newVal = val.substring(0, atIdx) + '@' + cat.name + ' ' + after;
+    textarea.value = newVal;
+    var newPos = atIdx + 1 + cat.name.length + 1;
+    textarea.selectionStart = newPos;
+    textarea.selectionEnd = newPos;
+    textarea.focus();
+    closeMentionPopup();
+}
+
+function closeMentionPopup() {
+    mentionActive = false;
+    mentionIndex = 0;
+    mentionFiltered = [];
+    var popup = document.getElementById('mentionPopup');
+    popup.classList.remove('active');
 }
 function autoResize(textarea) {
     textarea.style.height = 'auto';
@@ -726,6 +1136,283 @@ function toggleGlobalSettings() {
 function toggleSidebar() {
     document.getElementById('sidebar').classList.toggle('open');
 }
+function toggleCliProxy() {
+    var el = document.getElementById('cliProxySettings');
+    var arrow = document.getElementById('cliArrow');
+    if (el.style.display === 'none') { el.style.display = 'block'; arrow.textContent = '▼'; }
+    else { el.style.display = 'none'; arrow.textContent = '▶'; }
+}
+function onCliProxyToggle() {
+    var cb = document.getElementById('cliProxyEnabled');
+    var label = document.getElementById('cliProxyLabel');
+    cliProxy.enabled = cb.checked;
+    if (cb.checked) {
+        label.textContent = '已启用';
+        label.style.color = '#16a34a';
+        cliProxy.url = document.getElementById('cliProxyUrl').value.trim().replace(/\/+$/, '') || 'http://localhost:3456';
+        testCliConnection();
+    } else {
+        label.textContent = '未启用';
+        label.style.color = '';
+        cliProxy.connected = false;
+        updateCliStatusDot('off');
+        var st = document.getElementById('cliConnStatus');
+        st.style.display = 'none';
+    }
+}
+function testCliConnection() {
+    var proxyUrl = (document.getElementById('cliProxyUrl').value.trim().replace(/\/+$/, '') || 'http://localhost:3456');
+    cliProxy.url = proxyUrl;
+    var st = document.getElementById('cliConnStatus');
+    st.style.display = 'block';
+    st.className = 'cli-conn-status';
+    st.textContent = '🔄 正在连接 ' + proxyUrl + ' ...';
+    updateCliStatusDot('off');
+    fetch(proxyUrl + '/health', { method: 'GET' })
+        .then(function(res) { return res.json(); })
+        .then(function(data) {
+            if (data.status === 'ok') {
+                cliProxy.connected = true;
+                st.className = 'cli-conn-status success';
+                st.innerHTML = '✅ 连接成功！' + data.name + '<br>已处理 ' + data.requests + ' 个请求 · 运行 ' + Math.floor(data.uptime) + 's';
+                updateCliStatusDot('connected');
+                showToast('🟢 CLI 代理连接成功！');
+            } else {
+                throw new Error('意外的响应');
+            }
+        })
+        .catch(function(err) {
+            cliProxy.connected = false;
+            st.className = 'cli-conn-status error';
+            st.innerHTML = '❌ 连接失败！请确认 CLI 已启动<br><code>node cat_chat_cli.js</code>';
+            updateCliStatusDot('error');
+        });
+}
+function updateCliStatusDot(state) {
+    var dot = document.getElementById('cliStatusDot');
+    dot.className = 'cli-status' + (state === 'connected' ? ' connected' : state === 'error' ? ' error' : '');
+}
+function proxyFetch(url, options) {
+    if (!cliProxy.enabled || !cliProxy.connected) {
+        return fetch(url, options);
+    }
+    var proxyBody = {
+        targetUrl: url,
+        method: options.method || 'POST',
+        headers: options.headers || {},
+        body: options.body ? JSON.parse(options.body) : undefined
+    };
+    return fetch(cliProxy.url + '/proxy', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(proxyBody)
+    });
+}
 
 // ====================== Boot ======================
 init();
+
+// ====================== Export / Import Cats ======================
+function exportCats() {
+    if (cats.length === 0) { showToast('⚠️ 没有猫猫可以导出！'); return; }
+    var data = {
+        version: 1,
+        exportTime: new Date().toISOString(),
+        cats: cats.map(function(c) {
+            return {
+                name: c.name,
+                emoji: c.emoji,
+                color: c.color,
+                personality: c.personality,
+                provider: c.provider,
+                apiUrl: c.apiUrl,
+                apiKey: c.apiKey,
+                model: c.model,
+                claudeVersion: c.claudeVersion,
+                badgeClass: c.badgeClass
+            };
+        })
+    };
+    var json = JSON.stringify(data, null, 2);
+    var blob = new Blob([json], { type: 'application/json' });
+    var url = URL.createObjectURL(blob);
+    var a = document.createElement('a');
+    a.href = url;
+    a.download = 'catchat_cats_' + new Date().toISOString().slice(0, 10) + '.json';
+    document.body.appendChild(a);
+    a.click();
+    document.body.removeChild(a);
+    URL.revokeObjectURL(url);
+    showToast('✅ 已导出 ' + cats.length + ' 只猫猫的配置！');
+}
+
+function importCatsClick() {
+    document.getElementById('importCatsFile').click();
+}
+
+function importCatsFile(event) {
+    var file = event.target.files[0];
+    if (!file) return;
+    var reader = new FileReader();
+    reader.onload = function(e) {
+        try {
+            var data = JSON.parse(e.target.result);
+            if (!data.cats || !Array.isArray(data.cats) || data.cats.length === 0) {
+                showToast('❌ 文件格式错误或没有猫猫数据！');
+                return;
+            }
+            var count = 0;
+            data.cats.forEach(function(c) {
+                if (!c.name || !c.provider) return;
+                var cfg = PROVIDERS[c.provider];
+                if (!cfg) cfg = PROVIDERS.openai;
+                cats.push({
+                    id: Date.now().toString() + '_' + count,
+                    name: c.name,
+                    emoji: c.emoji || '🐱',
+                    color: c.color || '#f582ae',
+                    personality: c.personality || '',
+                    provider: c.provider,
+                    apiUrl: c.apiUrl || cfg.defaultUrl,
+                    apiKey: c.apiKey || '',
+                    model: c.model || cfg.defaultModel,
+                    claudeVersion: c.claudeVersion || '2023-06-01',
+                    badgeClass: c.badgeClass || cfg.badgeClass
+                });
+                count++;
+            });
+            renderMembers();
+            updateOnlineCount();
+            if (gameMode === 'pipeline') pipelineUpdateRoleAssign();
+            if (gameMode === 'debate') debateUpdateOrder();
+            addSystemMessage('📥 已导入 ' + count + ' 只猫猫的配置！');
+            showToast('✅ 成功导入 ' + count + ' 只猫猫！');
+        } catch (err) {
+            showToast('❌ 解析文件失败：' + err.message);
+        }
+    };
+    reader.readAsText(file);
+    event.target.value = '';
+}
+
+// ====================== Cat Tooltip ======================
+var catTooltipEl = null;
+var catTooltipTimer = null;
+function showCatTooltip(catId, event) {
+    var cat = cats.find(function(c) { return c.id === catId; });
+    if (!cat) return;
+    if (catTooltipTimer) { clearTimeout(catTooltipTimer); catTooltipTimer = null; }
+    hideCatTooltipNow();
+    var tip = document.createElement('div');
+    tip.className = 'cat-tooltip';
+    tip.setAttribute('data-tooltip-cat', catId);
+    tip.onmouseenter = function() { if (catTooltipTimer) { clearTimeout(catTooltipTimer); catTooltipTimer = null; } };
+    tip.onmouseleave = function() { scheduleCatTooltipHide(); };
+    var cfg = PROVIDERS[cat.provider] || {};
+    var rows = '';
+    rows += '<div class="tt-row"><span class="tt-label">提供商</span><span class="tt-value">' + (cfg.icon || '') + ' ' + (cfg.name || cat.provider) + '</span></div>';
+    rows += '<div class="tt-row"><span class="tt-label">模型</span><span class="tt-value">' + escapeHtml(cat.model) + '</span></div>';
+    rows += '<div class="tt-row"><span class="tt-label">API 地址</span><span class="tt-value">' + escapeHtml(cat.apiUrl) + '</span></div>';
+    if (cat.provider === 'claude') {
+        rows += '<div class="tt-row"><span class="tt-label">API 版本</span><span class="tt-value">' + escapeHtml(cat.claudeVersion || '2023-06-01') + '</span></div>';
+    }
+    var personalityPreview = cat.personality.length > 120 ? cat.personality.substring(0, 120) + '…' : cat.personality;
+    tip.innerHTML = '<div class="tt-header"><div class="tt-avatar" style="background:linear-gradient(135deg,' + cat.color + ',' + adjustColor(cat.color, -20) + ');">' + cat.emoji + '</div><div class="tt-name">' + escapeHtml(cat.name) + '</div><button class="tt-edit-btn" onclick="openEditCatModal(\'' + cat.id + '\')">✏️ 编辑</button></div>' + rows + '<div class="tt-personality">🐾 ' + escapeHtml(personalityPreview) + '</div>';
+    document.body.appendChild(tip);
+    catTooltipEl = tip;
+    // Position tooltip near the avatar
+    var rect = event.target.closest('.member-avatar, .message-avatar').getBoundingClientRect();
+    var tipW = tip.offsetWidth, tipH = tip.offsetHeight;
+    var left = rect.right + 10;
+    var top = rect.top;
+    if (left + tipW > window.innerWidth - 10) left = rect.left - tipW - 10;
+    if (top + tipH > window.innerHeight - 10) top = window.innerHeight - tipH - 10;
+    if (top < 10) top = 10;
+    tip.style.left = left + 'px';
+    tip.style.top = top + 'px';
+}
+function scheduleCatTooltipHide() {
+    if (catTooltipTimer) clearTimeout(catTooltipTimer);
+    catTooltipTimer = setTimeout(function() { hideCatTooltipNow(); catTooltipTimer = null; }, 200);
+}
+function hideCatTooltip() {
+    scheduleCatTooltipHide();
+}
+function hideCatTooltipNow() {
+    if (catTooltipEl) { catTooltipEl.remove(); catTooltipEl = null; }
+}
+
+// ====================== Edit Cat Modal ======================
+var editCatProvider = 'openai';
+function openEditCatModal(catId) {
+    hideCatTooltipNow();
+    var cat = cats.find(function(c) { return c.id === catId; });
+    if (!cat) return;
+    document.getElementById('editCatId').value = catId;
+    document.getElementById('editCatName').value = cat.name;
+    document.getElementById('editCatPersonality').value = cat.personality;
+    document.getElementById('editCatApiUrl').value = cat.apiUrl;
+    document.getElementById('editCatApiKey').value = cat.apiKey;
+    document.getElementById('editCatModel').value = cat.model;
+    document.getElementById('editClaudeApiVersion').value = cat.claudeVersion || '2023-06-01';
+    editCatProvider = cat.provider;
+    // Render provider buttons
+    var provHtml = '';
+    Object.keys(PROVIDERS).forEach(function(k) {
+        var p = PROVIDERS[k];
+        provHtml += '<button class="edit-prov-btn ' + (k === cat.provider ? 'selected' : '') + '" data-prov="' + k + '" onclick="editSelectProvider(\'' + k + '\')">' + p.icon + ' ' + p.name + '</button>';
+    });
+    document.getElementById('editProviderCards').innerHTML = provHtml;
+    updateEditProviderUI(cat.provider);
+    document.getElementById('editCatModal').classList.add('active');
+}
+function editSelectProvider(p) {
+    editCatProvider = p;
+    document.querySelectorAll('#editProviderCards .edit-prov-btn').forEach(function(b) { b.classList.remove('selected'); });
+    document.querySelector('#editProviderCards .edit-prov-btn[data-prov="' + p + '"]').classList.add('selected');
+    updateEditProviderUI(p);
+}
+function updateEditProviderUI(p) {
+    var cfg = PROVIDERS[p];
+    document.getElementById('editCatApiUrl').placeholder = cfg.defaultUrl;
+    document.getElementById('editApiUrlHint').textContent = cfg.urlHint;
+    document.getElementById('editCatModel').placeholder = cfg.defaultModel;
+    var pr = document.getElementById('editModelPresets');
+    pr.innerHTML = cfg.models.map(function(m) {
+        return '<button class="edit-preset-btn" onclick="document.getElementById(\'editCatModel\').value=\'' + m + '\';">' + m + '</button>';
+    }).join('');
+    pr.style.display = cfg.models.length ? 'flex' : 'none';
+    document.getElementById('editClaudeVersionGroup').style.display = (p === 'claude') ? 'block' : 'none';
+}
+function closeEditCatModal() {
+    document.getElementById('editCatModal').classList.remove('active');
+}
+function saveEditCat() {
+    var catId = document.getElementById('editCatId').value;
+    var cat = cats.find(function(c) { return c.id === catId; });
+    if (!cat) { showToast('❌ 猫猫不存在'); return; }
+    var name = document.getElementById('editCatName').value.trim();
+    if (!name) { showToast('⚠️ 名字不能为空！'); return; }
+    var provider = editCatProvider;
+    var cfg = PROVIDERS[provider];
+    var rawUrl = document.getElementById('editCatApiUrl').value.trim();
+    var apiUrl = rawUrl ? normalizeApiUrl(rawUrl, provider) : cfg.defaultUrl;
+    var apiKey = document.getElementById('editCatApiKey').value.trim();
+    if (!apiKey) {
+        var gKey = document.getElementById('globalApiKey').value.trim();
+        apiKey = gKey || '';
+    }
+    if (!apiKey) { showToast('⚠️ 请填写 API Key'); return; }
+    cat.name = name;
+    cat.personality = document.getElementById('editCatPersonality').value.trim() || cat.personality;
+    cat.provider = provider;
+    cat.apiUrl = apiUrl;
+    cat.apiKey = document.getElementById('editCatApiKey').value.trim() || document.getElementById('globalApiKey').value.trim() || '';
+    cat.model = document.getElementById('editCatModel').value.trim() || cfg.defaultModel;
+    cat.claudeVersion = document.getElementById('editClaudeApiVersion').value.trim() || '2023-06-01';
+    cat.badgeClass = cfg.badgeClass;
+    renderMembers();
+    closeEditCatModal();
+    showToast('✅ ' + cat.emoji + ' ' + cat.name + ' 的档案已更新！');
+    addSystemMessage('✏️ ' + cat.emoji + ' ' + cat.name + ' 的配置已被修改（' + cfg.icon + ' ' + cfg.name + ' · ' + cat.model + '）');
+}
