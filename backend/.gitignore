@@ -7,3 +7,4 @@ app/storage/__pycache__/
 app/__pycache__/
 tests/__pycache__/
 app/agent/__pycache__/
+app/api/__pycache__
