@@ -16,20 +16,45 @@ class PerspectiveEngine:
         role = player.role
         ctx = snapshot.round_context
 
-        alive_players: List[str] = [p.player_id for p in snapshot.players.values() if p.alive]
-        dead_players: List[str] = [p.player_id for p in snapshot.players.values() if not p.alive]
+        alive_player_ids: List[str] = [
+            p.player_id for p in snapshot.players.values() if p.alive
+        ]
+        dead_player_ids: List[str] = [
+            p.player_id for p in snapshot.players.values() if not p.alive
+        ]
+
+        alive_players: List[str] = [
+            PerspectiveEngine._player_name(snapshot.players.get(pid))
+            for pid in alive_player_ids
+        ]
+        dead_players: List[str] = [
+            PerspectiveEngine._player_name(snapshot.players.get(pid))
+            for pid in dead_player_ids
+        ]
 
         base: Dict[str, Any] = {
             "room_id": snapshot.room_id,
             "round_no": ctx.round_no,
             "phase": snapshot.phase.value,
             "player_id": player_id,
+            "player_name": PerspectiveEngine._player_name(player),
             "alive_players": alive_players,
             "dead_players": dead_players,
+            "alive_player_ids": alive_player_ids,
+            "dead_player_ids": dead_player_ids,
+            "target_candidates": [
+                PerspectiveEngine._player_name(snapshot.players.get(pid))
+                for pid in alive_player_ids
+                if pid != player_id
+            ],
             "public_deaths_this_round": {
-                pid: cause.value for pid, cause in ctx.deaths_this_round.items()
+                PerspectiveEngine._player_name(snapshot.players.get(pid)): cause.value
+                for pid, cause in ctx.deaths_this_round.items()
             },
-            "public_vote_log": PerspectiveEngine._extract_public_votes(snapshot.action_audit_log),
+            "public_vote_log": PerspectiveEngine._extract_public_votes(
+                snapshot.action_audit_log,
+                snapshot.players,
+            ),
             "your_identity_hint": PerspectiveEngine._identity_hint(role),
             "role_capability": {
                 "can_use_antidote": role == Role.WITCH and not player.used_antidote,
@@ -40,38 +65,73 @@ class PerspectiveEngine:
 
         if role == Role.WEREWOLF:
             base["wolf_team"] = [
+                PerspectiveEngine._player_name(p)
+                for p in snapshot.players.values()
+                if p.alive and p.role == Role.WEREWOLF
+            ]
+            base["wolf_team_ids"] = [
                 p.player_id
                 for p in snapshot.players.values()
                 if p.alive and p.role == Role.WEREWOLF
             ]
 
         if role == Role.WITCH and snapshot.phase == Phase.NIGHT_WITCH:
-            base["wolf_target"] = ctx.wolf_target
+            base["wolf_target"] = PerspectiveEngine._player_name(
+                snapshot.players.get(ctx.wolf_target) if ctx.wolf_target else None
+            )
+            base["wolf_target_id"] = ctx.wolf_target
 
         if role == Role.SEER:
-            base["seer_result"] = engine.get_seer_result(player_id)
+            seer_result = engine.get_seer_result(player_id)
+            if isinstance(seer_result, dict):
+                target_id = seer_result.get("target")
+                if isinstance(target_id, str):
+                    seer_result = dict(seer_result)
+                    seer_result["target_id"] = target_id
+                    seer_result["target"] = PerspectiveEngine._player_name(
+                        snapshot.players.get(target_id)
+                    )
+            base["seer_result"] = seer_result
 
         if role == Role.GUARD:
-            base["last_guard_target"] = player.last_guard_target
+            base["last_guard_target"] = PerspectiveEngine._player_name(
+                snapshot.players.get(player.last_guard_target)
+                if player.last_guard_target
+                else None
+            )
+            base["last_guard_target_id"] = player.last_guard_target
 
         return base
 
     @staticmethod
-    def _extract_public_votes(audit_log: list[dict]) -> list[dict]:
+    def _extract_public_votes(
+        audit_log: list[dict],
+        players: dict,
+    ) -> list[dict]:
         result: list[dict] = []
         for row in audit_log:
             if row.get("event_type") not in {"vote", "vote_result"}:
                 continue
             payload = row.get("payload", {})
+            actor_id = row.get("actor_id")
+            target_id = payload.get("target") if isinstance(payload, dict) else None
             result.append(
                 {
                     "event_type": row.get("event_type"),
-                    "actor_id": row.get("actor_id"),
-                    "target": payload.get("target") if isinstance(payload, dict) else None,
+                    "actor": PerspectiveEngine._player_name(players.get(actor_id)),
+                    "target": PerspectiveEngine._player_name(players.get(target_id)),
                     "ts": row.get("ts"),
                 }
             )
         return result[-50:]
+
+    @staticmethod
+    def _player_name(player: Any) -> str:
+        if not player:
+            return "unknown"
+        nickname = getattr(player, "nickname", None)
+        player_id = getattr(player, "player_id", None)
+        return str(nickname or player_id or "unknown")
 
     @staticmethod
     def _identity_hint(role: Role | None) -> str:

@@ -35,6 +35,7 @@ class StartGameResponse(BaseModel):
 class RoomPlayerView(BaseModel):
     player_id: str
     nickname: str
+    role: Optional[str] = None
     alive: bool
     online: bool
     can_vote: Optional[bool] = None
@@ -67,6 +68,7 @@ class CreateAIRoomRequest(BaseModel):
 class RegisterAgentRequest(BaseModel):
     model_config = ConfigDict(protected_namespaces=())
     player_id: str
+    nickname: Optional[str] = None
     ipc_endpoint: str
     model_type: str
     timeout_sec: int = Field(default=15, ge=3, le=60)
@@ -75,11 +77,14 @@ class RegisterAgentRequest(BaseModel):
     model_name: Optional[str] = None
     cli_command: Optional[str] = None
     cli_timeout_sec: int = Field(default=20, ge=3, le=120)
+    preflight_check: bool = False
 
 
 class RegisterAgentGlobalRequest(BaseModel):
+    model_config = ConfigDict(protected_namespaces=())
     room_id: str
     player_id: str
+    nickname: Optional[str] = None
     endpoint: str
     model: str
     timeout_sec: int = Field(default=15, ge=3, le=60)
@@ -88,6 +93,7 @@ class RegisterAgentGlobalRequest(BaseModel):
     model_name: Optional[str] = None
     cli_command: Optional[str] = None
     cli_timeout_sec: int = Field(default=20, ge=3, le=120)
+    preflight_check: bool = False
 
 
 class HotSwapAgentRequest(BaseModel):
@@ -101,7 +107,21 @@ class HotSwapAgentRequest(BaseModel):
     model_name: Optional[str] = None
     cli_command: Optional[str] = None
     cli_timeout_sec: int = Field(default=20, ge=3, le=120)
+    preflight_check: bool = False
     reset_role_runtime_state: bool = True
+
+
+class BootstrapAgentsRequest(BaseModel):
+    host: str = "127.0.0.1"
+    start_port: int = Field(default=9101, ge=1, le=65535)
+    startup_timeout_sec: float = Field(default=12.0, ge=1.0, le=60.0)
+    model_type: str = "cat-agent"
+    timeout_sec: int = Field(default=15, ge=3, le=60)
+    api_url: Optional[str] = None
+    api_key: Optional[str] = None
+    model_name: Optional[str] = None
+    cli_command: Optional[str] = None
+    cli_timeout_sec: int = Field(default=20, ge=3, le=120)
 
 
 class RunToEndRequest(BaseModel):

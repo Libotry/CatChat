@@ -3,7 +3,7 @@ from __future__ import annotations
 import json
 import random
 from pathlib import Path
-from typing import Any, Callable, Dict, Optional
+from typing import Callable, Dict
 
 from app.core.models import Role
 
@@ -57,8 +57,9 @@ class FallbackStrategies:
 
     @staticmethod
     def _night_wolf_action(context: dict) -> dict:
-        alive = context.get("alive_players", [])
-        non_wolf = [pid for pid in alive if pid not in context.get("wolf_team", [])]
+        alive = context.get("alive_player_ids") or context.get("alive_players", [])
+        wolf_team = context.get("wolf_team_ids") or context.get("wolf_team", [])
+        non_wolf = [pid for pid in alive if pid not in wolf_team]
         target = random.choice(non_wolf) if non_wolf else None
         return {
             "action": {"type": "kill", "target": target},
@@ -67,8 +68,8 @@ class FallbackStrategies:
 
     @staticmethod
     def _night_guard_action(context: dict) -> dict:
-        alive = context.get("alive_players", [])
-        last_guard_target = context.get("last_guard_target")
+        alive = context.get("alive_player_ids") or context.get("alive_players", [])
+        last_guard_target = context.get("last_guard_target_id") or context.get("last_guard_target")
         candidates = [pid for pid in alive if pid != last_guard_target] or alive
         target = random.choice(candidates) if candidates else None
         return {
@@ -78,14 +79,14 @@ class FallbackStrategies:
 
     @staticmethod
     def _night_witch_action(context: dict) -> dict:
-        wolf_target = context.get("wolf_target")
+        wolf_target = context.get("wolf_target_id") or context.get("wolf_target")
         role_capability = context.get("role_capability", {})
         if wolf_target and role_capability.get("can_use_antidote", False):
             return {
                 "action": {"type": "save", "target": wolf_target, "save": True},
                 "reasoning": "fallback/witch_save",
             }
-        alive = context.get("alive_players", [])
+        alive = context.get("alive_player_ids") or context.get("alive_players", [])
         poison_target = random.choice(alive) if alive and role_capability.get("can_use_poison", False) else None
         return {
             "action": {"type": "poison", "target": poison_target, "save": False},
@@ -94,7 +95,7 @@ class FallbackStrategies:
 
     @staticmethod
     def _night_seer_action(context: dict) -> dict:
-        alive = context.get("alive_players", [])
+        alive = context.get("alive_player_ids") or context.get("alive_players", [])
         me = context.get("player_id")
         candidates = [pid for pid in alive if pid != me]
         target = random.choice(candidates) if candidates else None
@@ -105,7 +106,7 @@ class FallbackStrategies:
 
     @staticmethod
     def _day_vote_action(context: dict) -> dict:
-        alive = context.get("alive_players", [])
+        alive = context.get("alive_player_ids") or context.get("alive_players", [])
         me = context.get("player_id")
         candidates = [pid for pid in alive if pid != me]
         target = random.choice(candidates) if candidates else None
@@ -124,7 +125,7 @@ class FallbackStrategies:
 
     @staticmethod
     def _hunter_shot_action(context: dict) -> dict:
-        alive = context.get("alive_players", [])
+        alive = context.get("alive_player_ids") or context.get("alive_players", [])
         me = context.get("player_id")
         candidates = [pid for pid in alive if pid != me]
         target = random.choice(candidates) if candidates else None

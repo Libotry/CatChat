@@ -12,13 +12,13 @@ from app.engine.game_engine import GameEngine
 
 @dataclass(slots=True)
 class PromptTemplates:
-    night_wolf: str = "请返回JSON: {\"action\": {\"target\": \"player_id\"}}"
-    night_guard: str = "请返回JSON: {\"action\": {\"target\": \"player_id\"}}"
-    night_witch: str = "请返回JSON: {\"action\": {\"target\": \"player_id\", \"save\": true|false}}"
-    night_seer: str = "请返回JSON: {\"action\": {\"target\": \"player_id\"}}"
+    night_wolf: str = "请返回JSON: {\"action\": {\"target\": \"player_name\"}}"
+    night_guard: str = "请返回JSON: {\"action\": {\"target\": \"player_name\"}}"
+    night_witch: str = "请返回JSON: {\"action\": {\"target\": \"player_name\", \"save\": true|false}}"
+    night_seer: str = "请返回JSON: {\"action\": {\"target\": \"player_name\"}}"
     day_discuss: str = "作为[角色]，请分析局势，怀疑对象及理由（100字内），返回JSON action+reasoning"
-    day_vote: str = "请返回JSON: {\"action\": {\"target\": \"player_id\"}}"
-    hunter_shot: str = "请返回JSON: {\"action\": {\"type\": \"shoot\", \"target\": \"player_id\"}}"
+    day_vote: str = "请返回JSON: {\"action\": {\"target\": \"player_name\"}}"
+    hunter_shot: str = "请返回JSON: {\"action\": {\"type\": \"shoot\", \"target\": \"player_name\"}}"
 
 
 class GodOrchestrator:
@@ -103,6 +103,17 @@ class GodOrchestrator:
                 prompt_template=self.templates.night_wolf,
                 strategy_name="night_wolf",
             )
+            engine._audit(
+                "agent_speech",
+                wolf.player_id,
+                {
+                    "phase": Phase.NIGHT_WOLF.value,
+                    "role": Role.WEREWOLF.value,
+                    "content": self._speech_text(result, default="夜间行动中。"),
+                    "is_fallback": bool(result.get("fallback_reason")),
+                    "fallback_reason": result.get("fallback_reason"),
+                },
+            )
             target = self._normalize_target(engine, result.get("action", {}).get("target"), exclude_wolves=True)
             if target:
                 try:
@@ -123,6 +134,17 @@ class GodOrchestrator:
             visible_state=visible,
             prompt_template=self.templates.night_guard,
             strategy_name="night_guard",
+        )
+        engine._audit(
+            "agent_speech",
+            guard.player_id,
+            {
+                "phase": Phase.NIGHT_GUARD.value,
+                "role": Role.GUARD.value,
+                "content": self._speech_text(result, default="守护目标已选择。"),
+                "is_fallback": bool(result.get("fallback_reason")),
+                "fallback_reason": result.get("fallback_reason"),
+            },
         )
         target = self._normalize_target(engine, result.get("action", {}).get("target"), allow_self=True)
         if target:
@@ -145,6 +167,17 @@ class GodOrchestrator:
             prompt_template=self.templates.night_witch,
             strategy_name="night_witch",
         )
+        engine._audit(
+            "agent_speech",
+            witch.player_id,
+            {
+                "phase": Phase.NIGHT_WITCH.value,
+                "role": Role.WITCH.value,
+                "content": self._speech_text(result, default="女巫正在权衡药剂使用。"),
+                "is_fallback": bool(result.get("fallback_reason")),
+                "fallback_reason": result.get("fallback_reason"),
+            },
+        )
         action = result.get("action", {})
         target = self._normalize_target(engine, action.get("target"), allow_self=True)
         save = bool(action.get("save", False))
@@ -166,6 +199,17 @@ class GodOrchestrator:
             visible_state=visible,
             prompt_template=self.templates.night_seer,
             strategy_name="night_seer",
+        )
+        engine._audit(
+            "agent_speech",
+            seer.player_id,
+            {
+                "phase": Phase.NIGHT_SEER.value,
+                "role": Role.SEER.value,
+                "content": self._speech_text(result, default="预言家正在查验身份。"),
+                "is_fallback": bool(result.get("fallback_reason")),
+                "fallback_reason": result.get("fallback_reason"),
+            },
         )
         target = self._normalize_target(engine, result.get("action", {}).get("target"), allow_self=False)
         if target:
@@ -193,7 +237,7 @@ class GodOrchestrator:
                 {
                     "phase": Phase.DAY_DISCUSS.value,
                     "role": player.role.value,
-                    "content": result.get("reasoning", ""),
+                    "content": self._speech_text(result, default="我先听听大家的意见。"),
                     "is_fallback": bool(result.get("fallback_reason")),
                     "fallback_reason": result.get("fallback_reason"),
                 },
@@ -223,7 +267,7 @@ class GodOrchestrator:
                 {
                     "phase": Phase.DAY_VOTE.value,
                     "role": player.role.value,
-                    "content": result.get("reasoning", ""),
+                    "content": self._speech_text(result, default="我已提交投票。"),
                     "is_fallback": bool(result.get("fallback_reason")),
                     "fallback_reason": result.get("fallback_reason"),
                 },
@@ -250,12 +294,43 @@ class GodOrchestrator:
             prompt_template=self.templates.hunter_shot,
             strategy_name="hunter_shot",
         )
+        engine._audit(
+            "agent_speech",
+            hunter.player_id,
+            {
+                "phase": "hunter_shot",
+                "role": Role.HUNTER.value,
+                "content": self._speech_text(result, default="猎人准备开枪。"),
+                "is_fallback": bool(result.get("fallback_reason")),
+                "fallback_reason": result.get("fallback_reason"),
+            },
+        )
         target = self._normalize_target(engine, result.get("action", {}).get("target"), allow_self=False)
         if target:
             try:
                 engine.submit_hunter_shot(hunter.player_id, target)
             except ValueError:
                 return
+
+    @staticmethod
+    def _speech_text(result: dict, *, default: str) -> str:
+        reasoning = str((result or {}).get("reasoning") or "").strip()
+        if reasoning:
+            return reasoning
+        action = (result or {}).get("action") or {}
+        if not isinstance(action, dict):
+            return default
+        action_type = str(action.get("type") or "").strip()
+        target = action.get("target")
+        save = action.get("save")
+        parts: list[str] = []
+        if action_type:
+            parts.append(f"行动={action_type}")
+        if isinstance(target, str) and target:
+            parts.append(f"目标={target}")
+        if isinstance(save, bool):
+            parts.append(f"save={save}")
+        return "；".join(parts) if parts else default
 
     @staticmethod
     def _normalize_target(
@@ -267,9 +342,39 @@ class GodOrchestrator:
     ) -> Optional[str]:
         if not isinstance(target, str):
             return None
-        player = engine.snapshot.players.get(target)
+        raw = target.strip()
+        if not raw:
+            return None
+
+        resolved_id: Optional[str] = None
+        if raw in engine.snapshot.players:
+            resolved_id = raw
+        else:
+            exact = [
+                p.player_id
+                for p in engine.snapshot.players.values()
+                if (p.nickname or "").strip() == raw
+            ]
+            if len(exact) == 1:
+                resolved_id = exact[0]
+            elif len(exact) > 1:
+                return None
+            else:
+                lowered = raw.lower()
+                fuzzy = [
+                    p.player_id
+                    for p in engine.snapshot.players.values()
+                    if (p.nickname or "").strip().lower() == lowered
+                ]
+                if len(fuzzy) == 1:
+                    resolved_id = fuzzy[0]
+
+        if not resolved_id:
+            return None
+
+        player = engine.snapshot.players.get(resolved_id)
         if not player or not player.alive:
             return None
         if exclude_wolves and player.role == Role.WEREWOLF:
             return None
-        return target
+        return resolved_id

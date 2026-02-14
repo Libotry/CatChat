@@ -5,6 +5,9 @@ from dataclasses import dataclass, field
 from threading import RLock
 from typing import Dict, Optional
 
+import httpx
+
+from app.agent.child_process_manager import ChildAgentProcessManager
 from app.agent.god_orchestrator import GodOrchestrator
 from app.core.game_config import default_game_config
 from app.engine.game_engine import GameEngine
@@ -24,6 +27,7 @@ class RoomManager:
         self._rooms: Dict[str, Room] = {}
         self._lock = RLock()
         self.repository = repository or SQLiteRepository("./backend/data/werewolf.db")
+        self.child_agents = ChildAgentProcessManager()
 
     def create_room(
         self,
@@ -100,6 +104,7 @@ class RoomManager:
         self,
         room_id: str,
         player_id: str,
+        nickname: Optional[str],
         ipc_endpoint: str,
         model_type: str,
         timeout_sec: int,
@@ -108,10 +113,24 @@ class RoomManager:
         model_name: Optional[str] = None,
         cli_command: Optional[str] = None,
         cli_timeout_sec: int = 20,
+        preflight_check: bool = False,
     ) -> dict:
         room = self.must_get_room(room_id)
         if player_id not in room.engine.snapshot.players:
             raise ValueError("player not found")
+        self._assert_agent_endpoint(ipc_endpoint)
+        if preflight_check:
+            self._assert_agent_model_access(
+                ipc_endpoint=ipc_endpoint,
+                player_id=player_id,
+                api_url=api_url,
+                api_key=api_key,
+                model_name=model_name,
+                cli_command=cli_command,
+                cli_timeout_sec=cli_timeout_sec,
+            )
+        if isinstance(nickname, str) and nickname.strip():
+            room.engine.snapshot.players[player_id].nickname = nickname.strip()
         reg = room.orchestrator.scheduler.registry.register(
             player_id=player_id,
             ipc_endpoint=ipc_endpoint,
@@ -150,12 +169,24 @@ class RoomManager:
         model_name: Optional[str],
         cli_command: Optional[str],
         cli_timeout_sec: int,
+        preflight_check: bool,
         reset_role_runtime_state: bool,
     ) -> dict:
         room = self.must_get_room(room_id)
         player = room.engine.snapshot.players.get(player_id)
         if not player:
             raise ValueError("player not found")
+        self._assert_agent_endpoint(ipc_endpoint)
+        if preflight_check:
+            self._assert_agent_model_access(
+                ipc_endpoint=ipc_endpoint,
+                player_id=player_id,
+                api_url=api_url,
+                api_key=api_key,
+                model_name=model_name,
+                cli_command=cli_command,
+                cli_timeout_sec=cli_timeout_sec,
+            )
 
         reg = room.orchestrator.scheduler.registry.register(
             player_id=player_id,
@@ -189,6 +220,141 @@ class RoomManager:
             "online": reg.online,
             "reset_role_runtime_state": reset_role_runtime_state,
         }
+
+    def bootstrap_agents(
+        self,
+        room_id: str,
+        host: str,
+        start_port: int,
+        startup_timeout_sec: float,
+        model_type: str,
+        timeout_sec: int,
+        api_url: Optional[str],
+        api_key: Optional[str],
+        model_name: Optional[str],
+        cli_command: Optional[str],
+        cli_timeout_sec: int,
+    ) -> dict:
+        room = self.must_get_room(room_id)
+        players = list(room.engine.snapshot.players.values())
+        player_ids = [p.player_id for p in players]
+        endpoints = self.child_agents.bootstrap_room(
+            room_id=room_id,
+            player_ids=player_ids,
+            host=host,
+            start_port=start_port,
+            startup_timeout_sec=startup_timeout_sec,
+        )
+
+        return {
+            "room_id": room_id,
+            "bootstrap_defaults": {
+                "model_type": model_type,
+                "timeout_sec": timeout_sec,
+                "api_url": bool(api_url),
+                "api_key": bool(api_key),
+                "model_name": model_name,
+                "cli_command": bool(cli_command),
+                "cli_timeout_sec": cli_timeout_sec,
+            },
+            "endpoints": endpoints,
+            "child_processes": self.child_agents.status(room_id),
+        }
+
+    def teardown_agents(self, room_id: str) -> dict:
+        self.child_agents.stop_room(room_id)
+        return {"room_id": room_id, "stopped": True}
+
+    def child_process_status(self, room_id: str) -> dict:
+        self.must_get_room(room_id)
+        return {
+            "room_id": room_id,
+            "child_processes": self.child_agents.status(room_id),
+        }
+
+    @staticmethod
+    def _assert_agent_endpoint(ipc_endpoint: str) -> None:
+        base = (ipc_endpoint or "").strip().rstrip("/")
+        if not base:
+            raise ValueError("ipc_endpoint is required")
+        health_url = base + "/health"
+        try:
+            with httpx.Client(timeout=2.5) as client:
+                resp = client.get(health_url)
+            if resp.status_code >= 400:
+                raise ValueError(f"agent endpoint unhealthy: {health_url} -> HTTP {resp.status_code}")
+        except ValueError:
+            raise
+        except Exception as exc:  # noqa: BLE001
+            raise ValueError(f"agent endpoint unreachable: {health_url} ({type(exc).__name__})") from exc
+
+    @staticmethod
+    def _assert_agent_model_access(
+        *,
+        ipc_endpoint: str,
+        player_id: str,
+        api_url: Optional[str],
+        api_key: Optional[str],
+        model_name: Optional[str],
+        cli_command: Optional[str],
+        cli_timeout_sec: int,
+    ) -> None:
+        if not (cli_command or (api_url and api_key)):
+            return
+
+        url = (ipc_endpoint or "").strip().rstrip("/") + "/act"
+        payload = {
+            "session_id": "bootstrap-preflight",
+            "player_id": player_id,
+            "role": "villager",
+            "phase": "day_discuss",
+            "visible_state": {
+                "player_id": player_id,
+                "player_name": "probe",
+                "alive_players": ["probe", "test_target"],
+                "alive_player_ids": [player_id, "test_target"],
+            },
+            "prompt_template": "返回JSON action+reasoning",
+            "agent_config": {
+                "api_url": api_url,
+                "api_key": api_key,
+                "model_name": model_name,
+                "cli_command": cli_command,
+                "cli_timeout_sec": cli_timeout_sec,
+            },
+        }
+        timeout = httpx.Timeout(connect=5.0, read=45.0, write=10.0, pool=5.0)
+
+        def _once() -> None:
+            with httpx.Client(timeout=timeout) as client:
+                resp = client.post(url, json=payload)
+            if resp.status_code >= 400:
+                detail = ""
+                try:
+                    data = resp.json() if resp.content else {}
+                    detail = str((data or {}).get("detail") or "")
+                except Exception:  # noqa: BLE001
+                    detail = resp.text[:200] if resp.text else ""
+                msg = f"agent preflight http={resp.status_code}"
+                if detail:
+                    msg += f" detail={detail}"
+                raise ValueError(msg)
+
+            data = resp.json() if resp.content else {}
+            reasoning = str((data or {}).get("reasoning") or "")
+            if reasoning.startswith("[api-error:"):
+                raise ValueError("model api preflight failed: " + reasoning)
+            if reasoning.startswith("[cli-error:"):
+                raise ValueError("cli preflight failed: " + reasoning)
+
+        try:
+            _once()
+        except httpx.ReadTimeout:
+            _once()
+        except ValueError:
+            raise
+        except Exception as exc:  # noqa: BLE001
+            raise ValueError(f"agent preflight unreachable: {type(exc).__name__}") from exc
 
     async def ai_run_single_phase(self, room_id: str) -> dict:
         room = self.must_get_room(room_id)
@@ -318,6 +484,7 @@ class RoomManager:
             if not room:
                 return
             if room.engine.snapshot.game_over:
+                self.child_agents.stop_room(room_id)
                 snapshot = room.engine.snapshot
                 self.repository.save_finished_game(
                     room_id=snapshot.room_id,

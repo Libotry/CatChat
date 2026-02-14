@@ -5,6 +5,7 @@ import json
 from datetime import datetime
 
 from fastapi import FastAPI, WebSocket, WebSocketDisconnect
+from fastapi.middleware.cors import CORSMiddleware
 
 from app.api.deps import room_manager
 from app.api.rest import router as rest_router
@@ -14,6 +15,14 @@ app = FastAPI(
     title="Werewolf Backend",
     version="0.1.0",
     description="State-machine driven werewolf backend for standard 12-player game.",
+)
+
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=["*"],
+    allow_credentials=False,
+    allow_methods=["*"],
+    allow_headers=["*"],
 )
 
 app.include_router(rest_router)

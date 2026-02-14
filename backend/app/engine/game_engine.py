@@ -518,6 +518,7 @@ class GameEngine:
                 "role": row.get("payload", {}).get("role"),
                 "content": row.get("payload", {}).get("content", ""),
                 "is_fallback": row.get("payload", {}).get("is_fallback", False),
+                "fallback_reason": row.get("payload", {}).get("fallback_reason"),
                 "timestamp": row.get("ts"),
             }
             for row in self.snapshot.action_audit_log
@@ -538,6 +539,7 @@ class GameEngine:
                 {
                     "player_id": p.player_id,
                     "nickname": p.nickname,
+                    "role": p.role.value if p.role else None,
                     "alive": p.alive,
                     "online": p.online,
                     "can_vote": p.can_vote,

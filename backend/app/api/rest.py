@@ -9,6 +9,7 @@ from app.schemas import (
     AIPhaseRunResponse,
     AIRunToEndResponse,
     AgentStatusResponse,
+    BootstrapAgentsRequest,
     CreateAIRoomRequest,
     CreateRoomRequest,
     GenericMessage,
@@ -68,6 +69,7 @@ def register_agent(room_id: str, req: RegisterAgentRequest) -> dict:
         return room_manager.register_agent(
             room_id=room_id,
             player_id=req.player_id,
+            nickname=req.nickname,
             ipc_endpoint=req.ipc_endpoint,
             model_type=req.model_type,
             timeout_sec=req.timeout_sec,
@@ -76,6 +78,7 @@ def register_agent(room_id: str, req: RegisterAgentRequest) -> dict:
             model_name=req.model_name,
             cli_command=req.cli_command,
             cli_timeout_sec=req.cli_timeout_sec,
+            preflight_check=req.preflight_check,
         )
     except ValueError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
@@ -87,6 +90,7 @@ def register_agent_global(req: RegisterAgentGlobalRequest) -> dict:
         return room_manager.register_agent(
             room_id=req.room_id,
             player_id=req.player_id,
+            nickname=req.nickname,
             ipc_endpoint=req.endpoint,
             model_type=req.model,
             timeout_sec=req.timeout_sec,
@@ -95,6 +99,7 @@ def register_agent_global(req: RegisterAgentGlobalRequest) -> dict:
             model_name=req.model_name,
             cli_command=req.cli_command,
             cli_timeout_sec=req.cli_timeout_sec,
+            preflight_check=req.preflight_check,
         )
     except ValueError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
@@ -114,8 +119,45 @@ def hot_swap_agent(room_id: str, req: HotSwapAgentRequest) -> dict:
             model_name=req.model_name,
             cli_command=req.cli_command,
             cli_timeout_sec=req.cli_timeout_sec,
+            preflight_check=req.preflight_check,
             reset_role_runtime_state=req.reset_role_runtime_state,
         )
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+
+@router.post("/ai/rooms/{room_id}/agents/bootstrap", response_model=dict)
+def bootstrap_agents(room_id: str, req: BootstrapAgentsRequest) -> dict:
+    try:
+        return room_manager.bootstrap_agents(
+            room_id=room_id,
+            host=req.host,
+            start_port=req.start_port,
+            startup_timeout_sec=req.startup_timeout_sec,
+            model_type=req.model_type,
+            timeout_sec=req.timeout_sec,
+            api_url=req.api_url,
+            api_key=req.api_key,
+            model_name=req.model_name,
+            cli_command=req.cli_command,
+            cli_timeout_sec=req.cli_timeout_sec,
+        )
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+
+@router.post("/ai/rooms/{room_id}/agents/teardown", response_model=dict)
+def teardown_agents(room_id: str) -> dict:
+    try:
+        return room_manager.teardown_agents(room_id)
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+
+@router.get("/ai/rooms/{room_id}/agents/processes", response_model=dict)
+def child_process_status(room_id: str) -> dict:
+    try:
+        return room_manager.child_process_status(room_id)
     except ValueError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
 

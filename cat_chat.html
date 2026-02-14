@@ -363,7 +363,7 @@
                 <div class="mode-card" data-mode="debate" onclick="switchMode('debate')"><div class="mode-icon">🎯</div><div class="mode-label">辩论赛</div></div>
                 <div class="mode-card" data-mode="werewolf" onclick="switchMode('werewolf')"><div class="mode-icon">🐺</div><div class="mode-label">狼人杀</div></div>
                 <div class="mode-card" data-mode="pipeline" onclick="switchMode('pipeline')"><div class="mode-icon">🏗️</div><div class="mode-label">流水线</div></div>
-                <div class="mode-card" data-mode="monitor" onclick="switchMode('monitor')"><div class="mode-icon">🛰️</div><div class="mode-label">监控模式</div></div>
+                <div class="mode-card" data-mode="monitor" onclick="switchMode('monitor')"><div class="mode-icon">🛰️</div><div class="mode-label">联动观测</div></div>
             </div>
         </div>
         <div class="debate-panel" id="debatePanel">
@@ -417,11 +417,11 @@
             <div class="pp-status" id="ppStatus" style="display:none;"></div>
         </div>
         <div class="monitor-panel" id="monitorPanel">
-            <div class="mn-title">🛰️ 上帝监控台</div>
-            <div class="mn-info">连接后端 REST + WebSocket，实时查看阶段、猫猫状态与发言时间轴。</div>
+            <div class="mn-title">🛰️ 联动观测台</div>
+            <div class="mn-info">与狼人杀联动使用同一条后端流程：按前端猫猫配置建房/注册，并实时查看阶段、状态与发言。</div>
             <div class="mn-row">
                 <div class="form-group"><label style="color:rgba(255,255,255,0.72);font-size:12px;">后端地址</label><input id="monitorApiBase" type="text" placeholder="http://127.0.0.1:8000"/></div>
-                <div class="form-group"><label style="color:rgba(255,255,255,0.72);font-size:12px;">玩家数</label><select id="monitorPlayerCount"><option value="8">8</option><option value="9">9</option><option value="10">10</option><option value="11" selected>11</option><option value="12">12</option></select></div>
+                <div class="form-group"><label style="color:rgba(255,255,255,0.72);font-size:12px;">猫猫数量（自动）</label><select id="monitorPlayerCount"><option value="8">8</option><option value="9">9</option><option value="10">10</option><option value="11" selected>11</option><option value="12">12</option></select></div>
             </div>
             <div class="mn-row">
                 <div class="form-group"><label style="color:rgba(255,255,255,0.72);font-size:12px;">房间ID</label><input id="monitorRoomId" type="text" placeholder="创建后自动填充"/></div>
@@ -440,16 +440,18 @@
                 <div class="form-group"><label style="color:rgba(255,255,255,0.72);font-size:12px;">可选CLI命令</label><input id="monitorCliCommand" type="text" placeholder="留空=默认API调用"/></div>
             </div>
             <div class="mn-actions">
-                <button class="mn-btn mn-btn-main" onclick="monitorCreateRoom()">🏠 创建AI房间</button>
-                <button class="mn-btn mn-btn-main" onclick="monitorRegisterAgents()">🤖 注册AI猫猫</button>
+                <button class="mn-btn mn-btn-main" onclick="monitorCreateRoom()">🏠 按前端猫猫建房</button>
+                <button class="mn-btn mn-btn-main" onclick="monitorRegisterAgents()">🤖 同步前端猫猫到后端</button>
                 <button class="mn-btn mn-btn-main" onclick="monitorConnectWs()">🔌 连接WS</button>
                 <button class="mn-btn mn-btn-sub" onclick="monitorStartGame()">▶️ 开始游戏</button>
                 <button class="mn-btn mn-btn-sub" onclick="monitorAdvance()">⏭️ 推进阶段</button>
                 <button class="mn-btn mn-btn-sub" onclick="monitorLoadConfig()">📦 配置快照</button>
                 <button class="mn-btn mn-btn-sub" onclick="monitorLoadAgents()">🩺 Agent状态</button>
+                <button class="mn-btn mn-btn-sub" onclick="monitorLoadChildProcesses()">🧩 子进程状态</button>
             </div>
             <div class="mn-status">
                 <div class="mn-card"><div class="mn-card-title">全局状态</div><div id="monitorGlobal">未连接</div></div>
+                <div class="mn-card"><div class="mn-card-title">上帝身份表盘</div><div id="monitorGodBoard" class="mn-log"></div></div>
                 <div class="mn-card"><div class="mn-card-title">健康矩阵</div><div id="monitorHealth" class="mn-log"></div></div>
                 <div class="mn-card"><div class="mn-card-title">阶段日志</div><div id="monitorPhaseLog" class="mn-log"></div></div>
                 <div class="mn-card"><div class="mn-card-title">发言时间轴</div><div id="monitorSpeech" class="mn-log"></div></div>
