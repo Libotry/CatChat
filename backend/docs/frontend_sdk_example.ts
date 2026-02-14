@@ -51,6 +51,11 @@ export class WerewolfApiClient {
     endpoint: string;
     model: string;
     timeout_sec?: number;
+    api_url?: string;
+    api_key?: string;
+    model_name?: string;
+    cli_command?: string;
+    cli_timeout_sec?: number;
   }) {
     const { data } = await this.http.post("/api/agents/register", params);
     return data;

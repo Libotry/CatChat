@@ -16,6 +16,11 @@ class AgentRegistration:
     ipc_endpoint: str
     model_type: str
     timeout_sec: int = 15
+    api_url: Optional[str] = None
+    api_key: Optional[str] = None
+    model_name: Optional[str] = None
+    cli_command: Optional[str] = None
+    cli_timeout_sec: int = 20
     online: bool = True
     failed_count: int = 0
     entrusted: bool = False
@@ -63,12 +68,28 @@ class AgentRegistry:
     def __init__(self) -> None:
         self._agents: Dict[str, AgentRegistration] = {}
 
-    def register(self, player_id: str, ipc_endpoint: str, model_type: str, timeout_sec: int = 15) -> AgentRegistration:
+    def register(
+        self,
+        player_id: str,
+        ipc_endpoint: str,
+        model_type: str,
+        timeout_sec: int = 15,
+        api_url: Optional[str] = None,
+        api_key: Optional[str] = None,
+        model_name: Optional[str] = None,
+        cli_command: Optional[str] = None,
+        cli_timeout_sec: int = 20,
+    ) -> AgentRegistration:
         reg = AgentRegistration(
             player_id=player_id,
             ipc_endpoint=ipc_endpoint.rstrip("/"),
             model_type=model_type,
             timeout_sec=timeout_sec,
+            api_url=api_url,
+            api_key=api_key,
+            model_name=model_name,
+            cli_command=cli_command,
+            cli_timeout_sec=cli_timeout_sec,
             online=True,
             failed_count=0,
             entrusted=False,
@@ -122,6 +143,13 @@ class AgentScheduler:
             "phase": phase,
             "visible_state": visible_state,
             "prompt_template": prompt_template,
+            "agent_config": {
+                "api_url": agent.api_url,
+                "api_key": agent.api_key,
+                "model_name": agent.model_name or agent.model_type,
+                "cli_command": agent.cli_command,
+                "cli_timeout_sec": agent.cli_timeout_sec,
+            },
         }
 
         if self.debug_mode:
@@ -222,7 +250,24 @@ class AgentScheduler:
 
     @staticmethod
     def _desensitize_payload(payload: dict) -> dict:
-        text = str(payload)
+        def _mask(obj: object) -> object:
+            if isinstance(obj, dict):
+                masked: dict = {}
+                for key, value in obj.items():
+                    key_str = str(key).lower()
+                    if key_str in {"api_key", "password", "secret", "token"}:
+                        masked[key] = "***"
+                    else:
+                        masked[key] = _mask(value)
+                return masked
+            if isinstance(obj, list):
+                return [_mask(item) for item in obj]
+            return obj
+
+        cleaned = _mask(payload)
+        text = str(cleaned)
         if len(text) > 1000:
             return {"truncated": text[:1000] + "..."}
-        return payload
+        if isinstance(cleaned, dict):
+            return cleaned
+        return {"value": text[:1000]}

@@ -66,6 +66,19 @@ python run.py
 - `POST /api/ai/rooms/{room_id}/run-to-end`：自动运行到结算
 - `GET /api/replay/{record_id}`：读取结构化复盘包
 
+### Agent 调用配置（默认 API，CLI 可选）
+
+注册/热替换 Agent 时支持以下可选字段：
+
+- `api_url` / `api_key` / `model_name`：默认调用模式（推荐）
+- `cli_command` / `cli_timeout_sec`：可选 CLI 模式（仅传入时启用）
+
+优先级：
+
+1. 若传入 `cli_command`，子Agent走 CLI 调用
+2. 否则走 API 调用（需 `api_url` + `api_key`）
+3. 若都未配置，回退模板 mock 动作（便于联调）
+
 ## 猫猫子Agent模板
 
 目录：`cat_agent_template/`
@@ -107,6 +120,8 @@ python run.py
 3. 在“后端地址”填写 `http://127.0.0.1:8000`，点击 **创建AI房间**。
 4. 点击 **连接WS**（前端会自动发送 `subscribe`）。
 5. 可选：
+  - 填写 Agent 主机/起始端口 + 模型 API URL/API Key/模型名（或可选 CLI 命令）
+  - 点击 **注册AI猫猫**（批量调用 `POST /api/agents/register`）
   - 点击 **开始游戏**（调用 `POST /api/rooms/{room_id}/start`）
   - 点击 **推进阶段**（调用 `POST /api/rooms/{room_id}/advance`）
   - 切换视角（发送 `change_view`）

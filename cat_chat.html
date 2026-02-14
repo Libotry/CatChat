@@ -205,9 +205,21 @@
         .form-group input:focus, .form-group select:focus, .form-group textarea:focus { border-color: var(--accent-pink); }
         .form-group .hint { font-size: 12px; color: #aaa; margin-top: 6px; }
         .emoji-picker { display: flex; gap: 8px; flex-wrap: wrap; }
-        .emoji-option { width: 44px; height: 44px; border-radius: 50%; border: 2px solid rgba(0,0,0,0.08); background: var(--bg-primary); font-size: 22px; cursor: pointer; display: flex; align-items: center; justify-content: center; transition: all 0.2s; }
-        .emoji-option:hover { transform: scale(1.15); }
+        .emoji-option { width: 92px; border-radius: 12px; border: 2px solid rgba(0,0,0,0.08); background: var(--bg-primary); cursor: pointer; display: flex; flex-direction: column; align-items: center; justify-content: center; gap: 6px; padding: 8px 6px; transition: all 0.2s; }
+        .emoji-option:hover { transform: translateY(-2px); }
         .emoji-option.selected { border-color: var(--accent-pink); background: rgba(245,130,174,0.1); box-shadow: 0 0 0 3px rgba(245,130,174,0.2); }
+        .emoji-option .emoji-label { font-size: 11px; line-height: 1.3; color: var(--text-secondary); text-align: center; word-break: break-word; }
+        .cat-avatar-img { width: 100%; height: 100%; object-fit: cover; border-radius: 50%; display: block; }
+        .cat-avatar-img.cat-face { object-position: center 38%; transform: scale(1.18); }
+        .emoji-option .cat-avatar-img { width: 54px; height: 54px; }
+        .member-avatar .cat-avatar-img,
+        .message-avatar .cat-avatar-img,
+        .mention-avatar .cat-avatar-img,
+        .cat-tooltip .tt-avatar .cat-avatar-img { width: 100%; height: 100%; border-radius: inherit; }
+        .avatar-preview { width: 72px; height: 72px; border-radius: 50%; overflow: hidden; border: 2px solid rgba(0,0,0,0.08); background: #f5f5f5; display: flex; align-items: center; justify-content: center; }
+        .avatar-upload-row { display: flex; gap: 8px; align-items: center; margin-top: 8px; }
+        .avatar-upload-btn { padding: 8px 12px; border: 1px solid rgba(0,0,0,0.12); border-radius: 8px; background: #fff; font-size: 12px; cursor: pointer; }
+        .avatar-upload-btn:hover { border-color: var(--accent-pink); color: var(--accent-pink); }
         .color-picker { display: flex; gap: 8px; flex-wrap: wrap; }
         .color-option { width: 36px; height: 36px; border-radius: 50%; border: 3px solid transparent; cursor: pointer; transition: all 0.2s; }
         .color-option:hover { transform: scale(1.15); }
@@ -415,8 +427,21 @@
                 <div class="form-group"><label style="color:rgba(255,255,255,0.72);font-size:12px;">房间ID</label><input id="monitorRoomId" type="text" placeholder="创建后自动填充"/></div>
                 <div class="form-group"><label style="color:rgba(255,255,255,0.72);font-size:12px;">视角</label><select id="monitorViewMode" onchange="monitorChangeView()"><option value="god">god</option></select></div>
             </div>
+            <div class="mn-row">
+                <div class="form-group"><label style="color:rgba(255,255,255,0.72);font-size:12px;">Agent主机</label><input id="monitorAgentHost" type="text" placeholder="http://127.0.0.1" value="http://127.0.0.1"/></div>
+                <div class="form-group"><label style="color:rgba(255,255,255,0.72);font-size:12px;">起始端口</label><input id="monitorAgentStartPort" type="number" min="1" max="65535" value="9101"/></div>
+            </div>
+            <div class="mn-row">
+                <div class="form-group"><label style="color:rgba(255,255,255,0.72);font-size:12px;">模型 API URL</label><input id="monitorModelApiUrl" type="text" placeholder="https://.../v1/chat/completions"/></div>
+                <div class="form-group"><label style="color:rgba(255,255,255,0.72);font-size:12px;">模型 API Key</label><input id="monitorModelApiKey" type="password" placeholder="sk-..."/></div>
+            </div>
+            <div class="mn-row">
+                <div class="form-group"><label style="color:rgba(255,255,255,0.72);font-size:12px;">模型名称</label><input id="monitorModelName" type="text" placeholder="gpt-4o-mini / qwen-max"/></div>
+                <div class="form-group"><label style="color:rgba(255,255,255,0.72);font-size:12px;">可选CLI命令</label><input id="monitorCliCommand" type="text" placeholder="留空=默认API调用"/></div>
+            </div>
             <div class="mn-actions">
                 <button class="mn-btn mn-btn-main" onclick="monitorCreateRoom()">🏠 创建AI房间</button>
+                <button class="mn-btn mn-btn-main" onclick="monitorRegisterAgents()">🤖 注册AI猫猫</button>
                 <button class="mn-btn mn-btn-main" onclick="monitorConnectWs()">🔌 连接WS</button>
                 <button class="mn-btn mn-btn-sub" onclick="monitorStartGame()">▶️ 开始游戏</button>
                 <button class="mn-btn mn-btn-sub" onclick="monitorAdvance()">⏭️ 推进阶段</button>
@@ -497,6 +522,15 @@
         <div class="modal-body">
             <div class="form-group"><label>猫猫名字</label><input type="text" id="catName" placeholder="例如：橘座、布丁、大橘..." maxlength="20"/></div>
             <div class="form-group"><label>选择猫猫头像</label><div class="emoji-picker" id="emojiPicker"></div></div>
+            <div class="form-group">
+                <label>自定义头像（可选）</label>
+                <input type="text" id="catAvatarUrl" placeholder="粘贴头像图片 URL（留空则用品种头像）" oninput="onCustomAvatarUrlInput()"/>
+                <div class="avatar-upload-row">
+                    <button class="avatar-upload-btn" onclick="uploadCatAvatarClick()" type="button">📁 上传本地头像</button>
+                    <input type="file" id="catAvatarFile" accept="image/*" style="display:none;" onchange="onCatAvatarFileChange(event)"/>
+                    <div class="avatar-preview" id="catAvatarPreview"></div>
+                </div>
+            </div>
             <div class="form-group"><label>头像背景色</label><div class="color-picker" id="colorPicker"></div></div>
             <div class="form-group"><label>猫猫性格（System Prompt）</label><textarea id="catPersonality" rows="3" placeholder="例如：你是一只高冷的英短蓝猫，说话很酷但内心渴望被摸头..."></textarea><div class="hint">描述猫猫性格特点，AI 会按照此性格回复</div></div>
             <div class="form-group">
@@ -529,6 +563,16 @@
         <div class="modal-body">
             <input type="hidden" id="editCatId"/>
             <div class="form-group"><label>猫猫名字</label><input type="text" id="editCatName" maxlength="20"/></div>
+            <div class="form-group"><label>猫猫品种标签</label><input type="text" id="editCatBreed" maxlength="30" placeholder="例如：英国短毛猫 / 自定义猫猫"/></div>
+            <div class="form-group">
+                <label>自定义头像（可选）</label>
+                <input type="text" id="editCatAvatarUrl" placeholder="粘贴头像图片 URL" oninput="onEditCatAvatarUrlInput()"/>
+                <div class="avatar-upload-row">
+                    <button class="avatar-upload-btn" onclick="uploadEditCatAvatarClick()" type="button">📁 上传本地头像</button>
+                    <input type="file" id="editCatAvatarFile" accept="image/*" style="display:none;" onchange="onEditCatAvatarFileChange(event)"/>
+                    <div class="avatar-preview" id="editCatAvatarPreview"></div>
+                </div>
+            </div>
             <div class="form-group"><label>猫猫性格（System Prompt）</label><textarea id="editCatPersonality" rows="3"></textarea></div>
             <div class="form-group">
                 <label>AI 提供商</label>

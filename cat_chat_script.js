@@ -1,6 +1,20 @@
 // ====================== Constants ======================
 const catEmojis = ['🐱','😺','😸','😹','😻','😼','😽','🙀','😿','😾','🐈','🐈‍⬛','🐾','🦁'];
 const catColors = ['#f582ae','#ff8c42','#ffd803','#a8d8a8','#8bd3dd','#b8a9c9','#f6a6b2','#ffb347','#87ceeb','#dda0dd','#98d8c8','#f7dc6f'];
+const CAT_BREED_AVATARS = [
+    { breed:'英国短毛猫', icon:'🐱', imageUrl:'https://loremflickr.com/320/320/cat-face,closeup,portrait,british-shorthair?lock=101' },
+    { breed:'美国短毛猫', icon:'🐱', imageUrl:'https://loremflickr.com/320/320/cat-face,closeup,portrait,american-shorthair?lock=102' },
+    { breed:'布偶猫', icon:'🐱', imageUrl:'https://loremflickr.com/320/320/cat-face,closeup,portrait,ragdoll?lock=103' },
+    { breed:'暹罗猫', icon:'🐱', imageUrl:'https://loremflickr.com/320/320/cat-face,closeup,portrait,siamese?lock=104' },
+    { breed:'波斯猫', icon:'🐱', imageUrl:'https://loremflickr.com/320/320/cat-face,closeup,portrait,persian-cat?lock=105' },
+    { breed:'缅因猫', icon:'🐱', imageUrl:'https://loremflickr.com/320/320/cat-face,closeup,portrait,maine-coon?lock=106' },
+    { breed:'挪威森林猫', icon:'🐱', imageUrl:'https://loremflickr.com/320/320/cat-face,closeup,portrait,norwegian-forest-cat?lock=107' },
+    { breed:'俄罗斯蓝猫', icon:'🐱', imageUrl:'https://loremflickr.com/320/320/cat-face,closeup,portrait,russian-blue?lock=108' },
+    { breed:'孟加拉猫', icon:'🐱', imageUrl:'https://loremflickr.com/320/320/cat-face,closeup,portrait,bengal-cat?lock=109' },
+    { breed:'斯芬克斯猫', icon:'🐱', imageUrl:'https://loremflickr.com/320/320/cat-face,closeup,portrait,sphynx-cat?lock=110' },
+    { breed:'阿比西尼亚猫', icon:'🐱', imageUrl:'https://loremflickr.com/320/320/cat-face,closeup,portrait,abyssinian-cat?lock=111' },
+    { breed:'苏格兰折耳猫', icon:'🐱', imageUrl:'https://loremflickr.com/320/320/cat-face,closeup,portrait,scottish-fold?lock=112' }
+];
 const PROVIDERS = {
     openai: { name:'OpenAI',icon:'🟢',defaultUrl:'https://api.openai.com/v1/chat/completions',urlHint:'支持所有 OpenAI 兼容接口',models:['gpt-4o','gpt-4o-mini','gpt-4-turbo','gpt-3.5-turbo','deepseek-chat','qwen-turbo'],defaultModel:'gpt-4o-mini',badgeClass:'openai' },
     claude: { name:'Claude',icon:'🟠',defaultUrl:'https://api.anthropic.com/v1/messages',urlHint:'Anthropic 官方或代理地址',models:['claude-sonnet-4-20250514','claude-haiku-4-20250414','claude-3-5-sonnet-20241022','claude-3-opus-20240229'],defaultModel:'claude-sonnet-4-20250514',badgeClass:'claude' },
@@ -15,10 +29,13 @@ const WEREWOLF_ROLES = [
     { id:'hunter',name:'猎人',icon:'🏹',team:'good',desc:'被淘汰时可开枪带走一人' },
     { id:'guard',name:'守卫',icon:'🛡️',team:'good',desc:'每晚可以守护一名玩家' }
 ];
+const MONITOR_CONFIG_STORAGE_KEY = 'catchat.monitor.config.v1';
 
 // ====================== State ======================
 let cats = [], messages = [];
 let selectedEmoji = '🐱', selectedColor = '#f582ae', selectedProvider = 'openai';
+let selectedAvatarUrl = '';
+let selectedBreed = CAT_BREED_AVATARS[0].breed;
 let gameMode = 'discuss', judgeView = true;
 let wfState = {
     active:false,
@@ -45,7 +62,13 @@ let monitorState = {
     speechTimeline: [],
     speechSeenKeys: {},
     speechRenderedKeys: {},
-    players: []
+    players: [],
+    agentHost: 'http://127.0.0.1',
+    agentStartPort: 9101,
+    modelApiUrl: '',
+    modelApiKey: '',
+    modelName: '',
+    cliCommand: ''
 };
 
 function werewolfMapBackendPhase(phase) {
@@ -103,11 +126,14 @@ function werewolfPseudoCat(playerId) {
     var idx = Math.abs((playerId || '').split('').reduce(function(acc, ch) {
         return acc + ch.charCodeAt(0);
     }, 0)) % catColors.length;
+    var avatar = CAT_BREED_AVATARS[idx % CAT_BREED_AVATARS.length];
     return {
         id: 'linked_' + playerId,
         name: playerId,
-        emoji: '🐾',
-        color: catColors[idx]
+        emoji: avatar.icon,
+        color: catColors[idx],
+        breed: avatar.breed,
+        avatarUrl: ''
     };
 }
 
@@ -187,14 +213,109 @@ function init() {
 
 // ====================== Pickers ======================
 function renderEmojiPicker() {
-    document.getElementById('emojiPicker').innerHTML = catEmojis.map(function(e, i) {
-        return '<div class="emoji-option ' + (i === 0 ? 'selected' : '') + '" onclick="selectEmoji(\'' + e + '\',this)">' + e + '</div>';
+    document.getElementById('emojiPicker').innerHTML = CAT_BREED_AVATARS.map(function(item, i) {
+        var selected = (item.breed === selectedBreed) ? 'selected' : '';
+        return '<div class="emoji-option ' + selected + '" onclick="selectEmoji(' + i + ',this)"><div style="font-size:36px;line-height:1;">' + escapeHtml(item.icon) + '</div><div class="emoji-label">' + escapeHtml(item.breed) + '</div></div>';
     }).join('');
 }
-function selectEmoji(emoji, el) {
+function selectEmoji(index, el) {
+    var item = CAT_BREED_AVATARS[index] || CAT_BREED_AVATARS[0];
     document.querySelectorAll('.emoji-option').forEach(function(e) { e.classList.remove('selected'); });
     el.classList.add('selected');
-    selectedEmoji = emoji;
+    selectedEmoji = item.icon;
+    selectedAvatarUrl = '';
+    selectedBreed = item.breed;
+
+    var nameInput = document.getElementById('catName');
+    if (!nameInput) return;
+    var current = (nameInput.value || '').trim();
+    var autoFilled = nameInput.dataset.autoFilledName === '1';
+    if (!current || autoFilled) {
+        nameInput.value = item.breed;
+        nameInput.dataset.autoFilledName = '1';
+    }
+
+    var customAvatarInput = document.getElementById('catAvatarUrl');
+    if (!customAvatarInput || !(customAvatarInput.value || '').trim()) {
+        updateAddAvatarPreview('');
+    }
+}
+
+function updateAddAvatarPreview(url) {
+    var preview = document.getElementById('catAvatarPreview');
+    if (!preview) return;
+    var finalUrl = (url || '').trim() || selectedAvatarUrl;
+    if (finalUrl) {
+        preview.innerHTML = '<img class="cat-avatar-img cat-face" src="' + escapeHtml(finalUrl) + '" alt="头像预览"/>';
+    } else {
+        preview.innerHTML = '<div style="font-size:38px;line-height:1;">' + escapeHtml(selectedEmoji || '🐱') + '</div>';
+    }
+}
+
+function onCustomAvatarUrlInput() {
+    var input = document.getElementById('catAvatarUrl');
+    if (!input) return;
+    updateAddAvatarPreview(input.value || '');
+}
+
+function uploadCatAvatarClick() {
+    var fileInput = document.getElementById('catAvatarFile');
+    if (!fileInput) return;
+    fileInput.click();
+}
+
+function onCatAvatarFileChange(event) {
+    var file = event && event.target && event.target.files ? event.target.files[0] : null;
+    if (!file) return;
+    var reader = new FileReader();
+    reader.onload = function(e) {
+        var dataUrl = e && e.target ? e.target.result : '';
+        document.getElementById('catAvatarUrl').value = dataUrl;
+        updateAddAvatarPreview(dataUrl);
+    };
+    reader.readAsDataURL(file);
+}
+
+function updateEditAvatarPreview(url) {
+    var preview = document.getElementById('editCatAvatarPreview');
+    if (!preview) return;
+    var finalUrl = (url || '').trim();
+    if (!finalUrl) {
+        preview.innerHTML = '';
+        return;
+    }
+    preview.innerHTML = '<img class="cat-avatar-img cat-face" src="' + escapeHtml(finalUrl) + '" alt="头像预览"/>';
+}
+
+function onEditCatAvatarUrlInput() {
+    var input = document.getElementById('editCatAvatarUrl');
+    if (!input) return;
+    updateEditAvatarPreview(input.value || '');
+}
+
+function uploadEditCatAvatarClick() {
+    var fileInput = document.getElementById('editCatAvatarFile');
+    if (!fileInput) return;
+    fileInput.click();
+}
+
+function onEditCatAvatarFileChange(event) {
+    var file = event && event.target && event.target.files ? event.target.files[0] : null;
+    if (!file) return;
+    var reader = new FileReader();
+    reader.onload = function(e) {
+        var dataUrl = e && e.target ? e.target.result : '';
+        document.getElementById('editCatAvatarUrl').value = dataUrl;
+        updateEditAvatarPreview(dataUrl);
+    };
+    reader.readAsDataURL(file);
+}
+
+function catAvatarHtml(cat) {
+    if (cat && cat.avatarUrl) {
+        return '<img class="cat-avatar-img cat-face" src="' + escapeHtml(cat.avatarUrl) + '" alt="' + escapeHtml(cat.breed || cat.name || '猫猫') + '"/>';
+    }
+    return escapeHtml((cat && cat.emoji) || '🐱');
 }
 function renderColorPicker() {
     document.getElementById('colorPicker').innerHTML = catColors.map(function(c, i) {
@@ -827,6 +948,16 @@ function pipelineReset() {
 // ====================== Modal ======================
 function openAddCatModal() {
     document.getElementById('addCatModal').classList.add('active');
+    var nameInput = document.getElementById('catName');
+    if (nameInput && !nameInput.dataset.autoBindDone) {
+        nameInput.addEventListener('input', function() {
+            if ((nameInput.value || '').trim() !== selectedBreed) {
+                nameInput.dataset.autoFilledName = '0';
+            }
+        });
+        nameInput.dataset.autoBindDone = '1';
+    }
+    updateAddAvatarPreview((document.getElementById('catAvatarUrl').value || '').trim());
     setTimeout(function() { document.getElementById('catName').focus(); }, 100);
 }
 function closeAddCatModal() {
@@ -834,16 +965,25 @@ function closeAddCatModal() {
     resetForm();
 }
 function resetForm() {
-    ['catName','catApiUrl','catApiKey','catModel','catPersonality'].forEach(function(id) {
+    ['catName','catApiUrl','catApiKey','catModel','catPersonality','catAvatarUrl'].forEach(function(id) {
         document.getElementById(id).value = '';
     });
+    var avatarFileInput = document.getElementById('catAvatarFile');
+    if (avatarFileInput) avatarFileInput.value = '';
     document.getElementById('claudeApiVersion').value = '2023-06-01';
-    selectedEmoji = '🐱';
+    selectedEmoji = CAT_BREED_AVATARS[0].icon;
+    selectedAvatarUrl = '';
+    selectedBreed = CAT_BREED_AVATARS[0].breed;
+    var nameInput = document.getElementById('catName');
+    if (nameInput) {
+        nameInput.dataset.autoFilledName = '0';
+    }
     selectedColor = '#f582ae';
     selectedProvider = 'openai';
     renderEmojiPicker();
     renderColorPicker();
     selectProvider('openai');
+    updateAddAvatarPreview('');
 }
 
 // ====================== Add / Remove Cat ======================
@@ -874,10 +1014,13 @@ function addCat() {
     var cfg = PROVIDERS[provider];
     var rawUrl = document.getElementById('catApiUrl').value.trim();
     var apiUrl = rawUrl ? normalizeApiUrl(rawUrl, provider) : cfg.defaultUrl;
+    var customAvatarUrl = document.getElementById('catAvatarUrl').value.trim();
     var cat = {
         id: Date.now().toString(),
         name: name,
         emoji: selectedEmoji,
+        avatarUrl: customAvatarUrl || selectedAvatarUrl,
+        breed: selectedBreed,
         color: selectedColor,
         personality: document.getElementById('catPersonality').value.trim() || '你是一只叫"' + name + '"的猫咪。用猫咪口吻说话，适当加入"喵"等语气词。你有自己的想法和情绪。',
         provider: provider,
@@ -892,8 +1035,8 @@ function addCat() {
     renderMembers();
     closeAddCatModal();
     updateOnlineCount();
-    addSystemMessage('🎉 ' + cat.emoji + ' ' + cat.name + ' 加入了聊天室！（' + cfg.icon + ' ' + cfg.name + ' · ' + cat.model + '）');
-    showToast(cat.emoji + ' ' + cat.name + ' 已加入！');
+    addSystemMessage('🎉 [' + cat.breed + '] ' + cat.name + ' 加入了聊天室！（' + cfg.icon + ' ' + cfg.name + ' · ' + cat.model + '）');
+    showToast('🐱 ' + cat.name + ' 已加入！');
     if (gameMode === 'pipeline') pipelineUpdateRoleAssign();
     if (gameMode === 'debate') debateUpdateOrder();
     var intro = buildApiMessages(cat, [{ role:'user', name:'铲屎官', content:'你刚加入聊天室，请简短做一个可爱的自我介绍（不超过50字）。' }], true);
@@ -905,7 +1048,7 @@ function removeCat(catId) {
     cats = cats.filter(function(c) { return c.id !== catId; });
     renderMembers();
     updateOnlineCount();
-    addSystemMessage(cat.emoji + ' ' + cat.name + ' 离开了聊天室');
+    addSystemMessage('🐱 ' + cat.name + ' 离开了聊天室');
     if (gameMode === 'pipeline') pipelineUpdateRoleAssign();
     if (gameMode === 'debate') {
         dbState.order = dbState.order.filter(function(id) { return id !== catId; });
@@ -931,7 +1074,7 @@ function renderMembers() {
             if (plState.roles.reviewer && plState.roles.reviewer.id === cat.id) roleHtml = ' <span class="pp-role-tag pp-role-review">🔍 检视</span>';
             if (plState.roles.tester && plState.roles.tester.id === cat.id) roleHtml = ' <span class="pp-role-tag pp-role-test">🧪 测试</span>';
         }
-        html += '<div class="member-card"><div class="member-avatar" style="background:linear-gradient(135deg,' + cat.color + ',' + adjustColor(cat.color, -20) + ');" onmouseenter="showCatTooltip(\'' + cat.id + '\',event)" onmouseleave="hideCatTooltip()">' + cat.emoji + '</div><div class="member-status"></div><div class="member-info"><div class="member-name">' + escapeHtml(cat.name) + '</div><div class="member-role"><span class="provider-badge ' + cat.badgeClass + '">' + PROVIDERS[cat.provider].icon + ' ' + cat.model + '</span>' + roleHtml + '</div></div><button class="member-remove" onclick="removeCat(\'' + cat.id + '\')" title="移除">✕</button></div>';
+        html += '<div class="member-card"><div class="member-avatar" style="background:linear-gradient(135deg,' + cat.color + ',' + adjustColor(cat.color, -20) + ');" onmouseenter="showCatTooltip(\'' + cat.id + '\',event)" onmouseleave="hideCatTooltip()">' + catAvatarHtml(cat) + '</div><div class="member-status"></div><div class="member-info"><div class="member-name">' + escapeHtml(cat.name) + '</div><div class="member-role"><span class="provider-badge ' + cat.badgeClass + '">' + PROVIDERS[cat.provider].icon + ' ' + cat.model + '</span> <span style="font-size:11px;color:rgba(0,0,0,0.45);">' + escapeHtml(cat.breed || '家猫') + '</span>' + roleHtml + '</div></div><button class="member-remove" onclick="removeCat(\'' + cat.id + '\')" title="移除">✕</button></div>';
     });
     list.innerHTML = html;
 }
@@ -967,7 +1110,7 @@ function addCatMessage(cat, text, isNight) {
     }
     var displayText = d.classList.contains('message-hidden') ? '🔒 [发言已隐藏]' : escapeHtml(text);
     var nightLabel = isNight ? ' 🌙' : '';
-    d.innerHTML = '<div class="message-avatar" style="background:linear-gradient(135deg,' + cat.color + ',' + adjustColor(cat.color, -20) + ');" onmouseenter="showCatTooltip(\'' + cat.id + '\',event)" onmouseleave="hideCatTooltip()">' + cat.emoji + '</div><div class="message-content"><div class="message-sender">' + escapeHtml(cat.name) + nightLabel + '</div><div class="message-bubble" data-real="' + escapeHtml(text) + '">' + displayText + '</div><div class="message-time">' + getTimeStr() + '</div></div>';
+    d.innerHTML = '<div class="message-avatar" style="background:linear-gradient(135deg,' + cat.color + ',' + adjustColor(cat.color, -20) + ');" onmouseenter="showCatTooltip(\'' + cat.id + '\',event)" onmouseleave="hideCatTooltip()">' + catAvatarHtml(cat) + '</div><div class="message-content"><div class="message-sender">' + escapeHtml(cat.name) + nightLabel + '</div><div class="message-bubble" data-real="' + escapeHtml(text) + '">' + displayText + '</div><div class="message-time">' + getTimeStr() + '</div></div>';
     document.getElementById('chatMessages').appendChild(d);
     scrollToBottom();
 }
@@ -975,7 +1118,7 @@ function addThinkingIndicator(cat) {
     var d = document.createElement('div');
     d.className = 'message cat-message';
     d.id = 'thinking-' + cat.id;
-    d.innerHTML = '<div class="message-avatar" style="background:linear-gradient(135deg,' + cat.color + ',' + adjustColor(cat.color, -20) + ');" onmouseenter="showCatTooltip(\'' + cat.id + '\',event)" onmouseleave="hideCatTooltip()">' + cat.emoji + '</div><div class="message-content"><div class="message-sender">' + escapeHtml(cat.name) + '</div><div class="message-thinking"><span>' + escapeHtml(cat.name) + ' 正在思考</span><div class="thinking-dots"><span></span><span></span><span></span></div></div></div>';
+    d.innerHTML = '<div class="message-avatar" style="background:linear-gradient(135deg,' + cat.color + ',' + adjustColor(cat.color, -20) + ');" onmouseenter="showCatTooltip(\'' + cat.id + '\',event)" onmouseleave="hideCatTooltip()">' + catAvatarHtml(cat) + '</div><div class="message-content"><div class="message-sender">' + escapeHtml(cat.name) + '</div><div class="message-thinking"><span>' + escapeHtml(cat.name) + ' 正在思考</span><div class="thinking-dots"><span></span><span></span><span></span></div></div></div>';
     document.getElementById('chatMessages').appendChild(d);
     scrollToBottom();
 }
@@ -1244,7 +1387,7 @@ function renderMentionPopup(list) {
     var popup = document.getElementById('mentionPopup');
     popup.innerHTML = list.map(function(cat, idx) {
         return '<div class="mention-item' + (idx === mentionIndex ? ' active' : '') + '" onmousedown="selectMention(cats.find(function(c){return c.id===\'' + cat.id + '\'}))">'
-            + '<div class="mention-avatar" style="background:linear-gradient(135deg,' + cat.color + ',' + adjustColor(cat.color, -20) + ');">' + cat.emoji + '</div>'
+            + '<div class="mention-avatar" style="background:linear-gradient(135deg,' + cat.color + ',' + adjustColor(cat.color, -20) + ');">' + catAvatarHtml(cat) + '</div>'
             + '<span class="mention-name">' + escapeHtml(cat.name) + '</span>'
             + '<span class="mention-model">' + escapeHtml(cat.model) + '</span>'
             + '</div>';
@@ -1398,12 +1541,168 @@ function proxyFetch(url, options) {
 
 // ====================== Monitor Mode (Werewolf Backend) ======================
 function monitorInit() {
+    monitorLoadPersistedConfig();
     var apiInput = document.getElementById('monitorApiBase');
     var countInput = document.getElementById('monitorPlayerCount');
+    var hostInput = document.getElementById('monitorAgentHost');
+    var portInput = document.getElementById('monitorAgentStartPort');
+    var apiUrlInput = document.getElementById('monitorModelApiUrl');
+    var apiKeyInput = document.getElementById('monitorModelApiKey');
+    var modelInput = document.getElementById('monitorModelName');
+    var cliInput = document.getElementById('monitorCliCommand');
     if (!apiInput || !countInput) return;
     apiInput.value = monitorState.apiBase;
     countInput.value = String(monitorState.playerCount);
+    if (hostInput) hostInput.value = monitorState.agentHost;
+    if (portInput) portInput.value = String(monitorState.agentStartPort);
+    if (apiUrlInput) apiUrlInput.value = monitorState.modelApiUrl;
+    if (apiKeyInput) apiKeyInput.value = monitorState.modelApiKey;
+    if (modelInput) modelInput.value = monitorState.modelName;
+    if (cliInput) cliInput.value = monitorState.cliCommand;
+    monitorBindConfigPersistence();
     monitorRenderGlobal('未连接');
+}
+
+function monitorLoadPersistedConfig() {
+    try {
+        var raw = localStorage.getItem(MONITOR_CONFIG_STORAGE_KEY);
+        if (!raw) return;
+        var saved = JSON.parse(raw);
+        if (!saved || typeof saved !== 'object') return;
+        monitorState.apiBase = saved.apiBase || monitorState.apiBase;
+        monitorState.playerCount = parseInt(saved.playerCount, 10) || monitorState.playerCount;
+        monitorState.agentHost = saved.agentHost || monitorState.agentHost;
+        monitorState.agentStartPort = parseInt(saved.agentStartPort, 10) || monitorState.agentStartPort;
+        monitorState.modelApiUrl = saved.modelApiUrl || '';
+        monitorState.modelApiKey = saved.modelApiKey || '';
+        monitorState.modelName = saved.modelName || '';
+        monitorState.cliCommand = saved.cliCommand || '';
+    } catch (e) {
+        console.warn('monitor config load failed', e);
+    }
+}
+
+function monitorPersistConfig() {
+    try {
+        var payload = {
+            apiBase: monitorState.apiBase,
+            playerCount: monitorState.playerCount,
+            agentHost: monitorState.agentHost,
+            agentStartPort: monitorState.agentStartPort,
+            modelApiUrl: monitorState.modelApiUrl,
+            modelApiKey: monitorState.modelApiKey,
+            modelName: monitorState.modelName,
+            cliCommand: monitorState.cliCommand
+        };
+        localStorage.setItem(MONITOR_CONFIG_STORAGE_KEY, JSON.stringify(payload));
+    } catch (e) {
+        console.warn('monitor config save failed', e);
+    }
+}
+
+function monitorBindConfigPersistence() {
+    var ids = [
+        'monitorApiBase',
+        'monitorPlayerCount',
+        'monitorAgentHost',
+        'monitorAgentStartPort',
+        'monitorModelApiUrl',
+        'monitorModelApiKey',
+        'monitorModelName',
+        'monitorCliCommand'
+    ];
+    ids.forEach(function(id) {
+        var el = document.getElementById(id);
+        if (!el || el.dataset.persistBound === '1') return;
+        var handler = function() {
+            monitorCollectInvokeConfig();
+            monitorPersistConfig();
+        };
+        el.addEventListener('change', handler);
+        el.addEventListener('blur', handler);
+        el.dataset.persistBound = '1';
+    });
+}
+
+function monitorCollectInvokeConfig() {
+    monitorState.apiBase = monitorNormalizeBase(document.getElementById('monitorApiBase').value) || monitorState.apiBase;
+    monitorState.playerCount = parseInt(document.getElementById('monitorPlayerCount').value, 10) || monitorState.playerCount;
+    var host = (document.getElementById('monitorAgentHost').value || '').trim() || 'http://127.0.0.1';
+    var startPort = parseInt(document.getElementById('monitorAgentStartPort').value, 10) || 9101;
+    var apiUrl = (document.getElementById('monitorModelApiUrl').value || '').trim();
+    var apiKey = (document.getElementById('monitorModelApiKey').value || '').trim();
+    var modelName = (document.getElementById('monitorModelName').value || '').trim();
+    var cliCommand = (document.getElementById('monitorCliCommand').value || '').trim();
+
+    monitorState.agentHost = host;
+    monitorState.agentStartPort = startPort;
+    monitorState.modelApiUrl = apiUrl;
+    monitorState.modelApiKey = apiKey;
+    monitorState.modelName = modelName;
+    monitorState.cliCommand = cliCommand;
+    monitorPersistConfig();
+
+    return {
+        host: host,
+        startPort: startPort,
+        apiUrl: apiUrl,
+        apiKey: apiKey,
+        modelName: modelName,
+        cliCommand: cliCommand
+    };
+}
+
+function monitorRegisterAgents() {
+    var roomId = monitorRoomId();
+    if (!roomId) { showToast('⚠️ 请先创建或填写房间 ID'); return; }
+
+    var cfg = monitorCollectInvokeConfig();
+    if (!cfg.cliCommand && (!cfg.apiUrl || !cfg.apiKey || !cfg.modelName)) {
+        showToast('⚠️ 默认模式需填写API URL/API Key/模型名；或填写CLI命令');
+        return;
+    }
+
+    monitorHttp('/api/rooms/' + encodeURIComponent(roomId)).then(function(state) {
+        var players = (state.players || []).map(function(p) { return p.player_id; });
+        if (!players.length) {
+            showToast('❌ 房间中没有可注册的玩家');
+            return;
+        }
+        monitorState.players = players;
+        monitorSyncViewOptions();
+
+        var requests = players.map(function(pid, idx) {
+            var body = {
+                room_id: roomId,
+                player_id: pid,
+                endpoint: cfg.host + ':' + (cfg.startPort + idx),
+                model: cfg.modelName || 'api-agent',
+                timeout_sec: 15,
+                api_url: cfg.apiUrl || null,
+                api_key: cfg.apiKey || null,
+                model_name: cfg.modelName || null,
+                cli_command: cfg.cliCommand || null,
+                cli_timeout_sec: 20
+            };
+            return monitorHttp('/api/agents/register', {
+                method: 'POST',
+                body: JSON.stringify(body)
+            });
+        });
+
+        Promise.all(requests).then(function(results) {
+            var mode = (results[0] && results[0].invoke_mode) || (cfg.cliCommand ? 'cli' : 'api');
+            monitorRenderGlobal('已注册' + results.length + '个Agent · mode=' + mode);
+            monitorAddPhaseLog('批量注册完成：' + results.length + '个 · mode=' + mode);
+            addSystemMessage('🤖 已完成AI猫猫注册：' + results.length + '个（' + mode + '）', 'pipeline-msg');
+            showToast('✅ Agent注册完成');
+        }).catch(function(err) {
+            showToast('❌ Agent注册失败：' + err.message);
+            monitorAddPhaseLog('Agent注册失败：' + err.message);
+        });
+    }).catch(function(err) {
+        showToast('❌ 获取房间玩家失败：' + err.message);
+    });
 }
 
 function monitorNormalizeBase(url) {
@@ -1413,6 +1712,7 @@ function monitorNormalizeBase(url) {
 function monitorHttp(path, options) {
     monitorState.apiBase = monitorNormalizeBase(document.getElementById('monitorApiBase').value) || 'http://127.0.0.1:8000';
     document.getElementById('monitorApiBase').value = monitorState.apiBase;
+    monitorPersistConfig();
     var req = Object.assign({ method: 'GET', headers: { 'Content-Type': 'application/json' } }, options || {});
     return fetch(monitorState.apiBase + path, req).then(function(res) {
         if (!res.ok) {
@@ -1687,6 +1987,8 @@ function exportCats() {
             return {
                 name: c.name,
                 emoji: c.emoji,
+                avatarUrl: c.avatarUrl,
+                breed: c.breed,
                 color: c.color,
                 personality: c.personality,
                 provider: c.provider,
@@ -1735,6 +2037,8 @@ function importCatsFile(event) {
                     id: Date.now().toString() + '_' + count,
                     name: c.name,
                     emoji: c.emoji || '🐱',
+                    avatarUrl: c.avatarUrl || '',
+                    breed: c.breed || '家猫',
                     color: c.color || '#f582ae',
                     personality: c.personality || '',
                     provider: c.provider,
@@ -1782,7 +2086,7 @@ function showCatTooltip(catId, event) {
         rows += '<div class="tt-row"><span class="tt-label">API 版本</span><span class="tt-value">' + escapeHtml(cat.claudeVersion || '2023-06-01') + '</span></div>';
     }
     var personalityPreview = cat.personality.length > 120 ? cat.personality.substring(0, 120) + '…' : cat.personality;
-    tip.innerHTML = '<div class="tt-header"><div class="tt-avatar" style="background:linear-gradient(135deg,' + cat.color + ',' + adjustColor(cat.color, -20) + ');">' + cat.emoji + '</div><div class="tt-name">' + escapeHtml(cat.name) + '</div><button class="tt-edit-btn" onclick="openEditCatModal(\'' + cat.id + '\')">✏️ 编辑</button></div>' + rows + '<div class="tt-personality">🐾 ' + escapeHtml(personalityPreview) + '</div>';
+    tip.innerHTML = '<div class="tt-header"><div class="tt-avatar" style="background:linear-gradient(135deg,' + cat.color + ',' + adjustColor(cat.color, -20) + ');">' + catAvatarHtml(cat) + '</div><div class="tt-name">' + escapeHtml(cat.name) + '</div><button class="tt-edit-btn" onclick="openEditCatModal(\'' + cat.id + '\')">✏️ 编辑</button></div>' + rows + '<div class="tt-row"><span class="tt-label">品种</span><span class="tt-value">' + escapeHtml(cat.breed || '家猫') + '</span></div><div class="tt-personality">🐾 ' + escapeHtml(personalityPreview) + '</div>';
     document.body.appendChild(tip);
     catTooltipEl = tip;
     // Position tooltip near the avatar
@@ -1815,6 +2119,11 @@ function openEditCatModal(catId) {
     if (!cat) return;
     document.getElementById('editCatId').value = catId;
     document.getElementById('editCatName').value = cat.name;
+    document.getElementById('editCatBreed').value = cat.breed || '';
+    document.getElementById('editCatAvatarUrl').value = cat.avatarUrl || '';
+    var editAvatarFileInput = document.getElementById('editCatAvatarFile');
+    if (editAvatarFileInput) editAvatarFileInput.value = '';
+    updateEditAvatarPreview(cat.avatarUrl || '');
     document.getElementById('editCatPersonality').value = cat.personality;
     document.getElementById('editCatApiUrl').value = cat.apiUrl;
     document.getElementById('editCatApiKey').value = cat.apiKey;
@@ -1868,7 +2177,17 @@ function saveEditCat() {
         apiKey = gKey || '';
     }
     if (!apiKey) { showToast('⚠️ 请填写 API Key'); return; }
+    var editedBreed = document.getElementById('editCatBreed').value.trim();
+    var editedAvatarUrl = document.getElementById('editCatAvatarUrl').value.trim();
     cat.name = name;
+    if (editedBreed) {
+        cat.breed = editedBreed;
+    }
+    if (editedAvatarUrl) {
+        cat.avatarUrl = editedAvatarUrl;
+    } else {
+        cat.avatarUrl = '';
+    }
     cat.personality = document.getElementById('editCatPersonality').value.trim() || cat.personality;
     cat.provider = provider;
     cat.apiUrl = apiUrl;
@@ -1878,6 +2197,6 @@ function saveEditCat() {
     cat.badgeClass = cfg.badgeClass;
     renderMembers();
     closeEditCatModal();
-    showToast('✅ ' + cat.emoji + ' ' + cat.name + ' 的档案已更新！');
-    addSystemMessage('✏️ ' + cat.emoji + ' ' + cat.name + ' 的配置已被修改（' + cfg.icon + ' ' + cfg.name + ' · ' + cat.model + '）');
+    showToast('✅ ' + cat.name + ' 的档案已更新！');
+    addSystemMessage('✏️ ' + cat.name + ' 的配置已被修改（' + cfg.icon + ' ' + cfg.name + ' · ' + cat.model + '）');
 }

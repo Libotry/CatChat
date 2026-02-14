@@ -71,6 +71,11 @@ def register_agent(room_id: str, req: RegisterAgentRequest) -> dict:
             ipc_endpoint=req.ipc_endpoint,
             model_type=req.model_type,
             timeout_sec=req.timeout_sec,
+            api_url=req.api_url,
+            api_key=req.api_key,
+            model_name=req.model_name,
+            cli_command=req.cli_command,
+            cli_timeout_sec=req.cli_timeout_sec,
         )
     except ValueError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
@@ -85,6 +90,11 @@ def register_agent_global(req: RegisterAgentGlobalRequest) -> dict:
             ipc_endpoint=req.endpoint,
             model_type=req.model,
             timeout_sec=req.timeout_sec,
+            api_url=req.api_url,
+            api_key=req.api_key,
+            model_name=req.model_name,
+            cli_command=req.cli_command,
+            cli_timeout_sec=req.cli_timeout_sec,
         )
     except ValueError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
@@ -99,6 +109,11 @@ def hot_swap_agent(room_id: str, req: HotSwapAgentRequest) -> dict:
             ipc_endpoint=req.ipc_endpoint,
             model_type=req.model_type,
             timeout_sec=req.timeout_sec,
+            api_url=req.api_url,
+            api_key=req.api_key,
+            model_name=req.model_name,
+            cli_command=req.cli_command,
+            cli_timeout_sec=req.cli_timeout_sec,
             reset_role_runtime_state=req.reset_role_runtime_state,
         )
     except ValueError as exc:

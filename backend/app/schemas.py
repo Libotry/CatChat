@@ -70,6 +70,11 @@ class RegisterAgentRequest(BaseModel):
     ipc_endpoint: str
     model_type: str
     timeout_sec: int = Field(default=15, ge=3, le=60)
+    api_url: Optional[str] = None
+    api_key: Optional[str] = None
+    model_name: Optional[str] = None
+    cli_command: Optional[str] = None
+    cli_timeout_sec: int = Field(default=20, ge=3, le=120)
 
 
 class RegisterAgentGlobalRequest(BaseModel):
@@ -78,6 +83,11 @@ class RegisterAgentGlobalRequest(BaseModel):
     endpoint: str
     model: str
     timeout_sec: int = Field(default=15, ge=3, le=60)
+    api_url: Optional[str] = None
+    api_key: Optional[str] = None
+    model_name: Optional[str] = None
+    cli_command: Optional[str] = None
+    cli_timeout_sec: int = Field(default=20, ge=3, le=120)
 
 
 class HotSwapAgentRequest(BaseModel):
@@ -86,6 +96,11 @@ class HotSwapAgentRequest(BaseModel):
     ipc_endpoint: str
     model_type: str
     timeout_sec: int = Field(default=15, ge=3, le=60)
+    api_url: Optional[str] = None
+    api_key: Optional[str] = None
+    model_name: Optional[str] = None
+    cli_command: Optional[str] = None
+    cli_timeout_sec: int = Field(default=20, ge=3, le=120)
     reset_role_runtime_state: bool = True
 
 

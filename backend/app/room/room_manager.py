@@ -96,16 +96,45 @@ class RoomManager:
         room = self.must_get_room(room_id)
         room.engine.start_game(owner_id)
 
-    def register_agent(self, room_id: str, player_id: str, ipc_endpoint: str, model_type: str, timeout_sec: int) -> dict:
+    def register_agent(
+        self,
+        room_id: str,
+        player_id: str,
+        ipc_endpoint: str,
+        model_type: str,
+        timeout_sec: int,
+        api_url: Optional[str] = None,
+        api_key: Optional[str] = None,
+        model_name: Optional[str] = None,
+        cli_command: Optional[str] = None,
+        cli_timeout_sec: int = 20,
+    ) -> dict:
         room = self.must_get_room(room_id)
         if player_id not in room.engine.snapshot.players:
             raise ValueError("player not found")
-        reg = room.orchestrator.scheduler.registry.register(player_id, ipc_endpoint, model_type, timeout_sec)
+        reg = room.orchestrator.scheduler.registry.register(
+            player_id=player_id,
+            ipc_endpoint=ipc_endpoint,
+            model_type=model_type,
+            timeout_sec=timeout_sec,
+            api_url=api_url,
+            api_key=api_key,
+            model_name=model_name,
+            cli_command=cli_command,
+            cli_timeout_sec=cli_timeout_sec,
+        )
+        invoke_mode = (
+            "cli"
+            if reg.cli_command
+            else ("api" if reg.api_url and reg.api_key else "mock")
+        )
         return {
             "player_id": reg.player_id,
             "ipc_endpoint": reg.ipc_endpoint,
             "model_type": reg.model_type,
             "timeout_sec": reg.timeout_sec,
+            "model_name": reg.model_name,
+            "invoke_mode": invoke_mode,
             "online": reg.online,
         }
 
@@ -116,6 +145,11 @@ class RoomManager:
         ipc_endpoint: str,
         model_type: str,
         timeout_sec: int,
+        api_url: Optional[str],
+        api_key: Optional[str],
+        model_name: Optional[str],
+        cli_command: Optional[str],
+        cli_timeout_sec: int,
         reset_role_runtime_state: bool,
     ) -> dict:
         room = self.must_get_room(room_id)
@@ -123,17 +157,35 @@ class RoomManager:
         if not player:
             raise ValueError("player not found")
 
-        reg = room.orchestrator.scheduler.registry.register(player_id, ipc_endpoint, model_type, timeout_sec)
+        reg = room.orchestrator.scheduler.registry.register(
+            player_id=player_id,
+            ipc_endpoint=ipc_endpoint,
+            model_type=model_type,
+            timeout_sec=timeout_sec,
+            api_url=api_url,
+            api_key=api_key,
+            model_name=model_name,
+            cli_command=cli_command,
+            cli_timeout_sec=cli_timeout_sec,
+        )
         player.online = True
         player.entrusted = False
         if reset_role_runtime_state:
             player.can_hunter_shoot = False
+
+        invoke_mode = (
+            "cli"
+            if reg.cli_command
+            else ("api" if reg.api_url and reg.api_key else "mock")
+        )
 
         return {
             "player_id": reg.player_id,
             "ipc_endpoint": reg.ipc_endpoint,
             "model_type": reg.model_type,
             "timeout_sec": reg.timeout_sec,
+            "model_name": reg.model_name,
+            "invoke_mode": invoke_mode,
             "online": reg.online,
             "reset_role_runtime_state": reset_role_runtime_state,
         }
@@ -167,6 +219,7 @@ class RoomManager:
                     "online": agent.online,
                     "entrusted": agent.entrusted,
                     "model_type": agent.model_type,
+                    "model_name": agent.model_name,
                     "timeout_sec": agent.timeout_sec,
                     "failed_count": agent.failed_count,
                 }
@@ -185,6 +238,12 @@ class RoomManager:
                     "online": agent.online,
                     "entrusted": agent.entrusted,
                     "model_type": agent.model_type,
+                    "model_name": agent.model_name,
+                    "invoke_mode": (
+                        "cli"
+                        if agent.cli_command
+                        else ("api" if agent.api_url and agent.api_key else "mock")
+                    ),
                     "timeout_sec": agent.timeout_sec,
                     "failed_count": agent.failed_count,
                     "last_heartbeat": agent.last_heartbeat.isoformat(),
