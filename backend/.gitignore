@@ -1,0 +1,9 @@
+app/config/__pycache__/
+app/core/__pycache__/
+app/engine/__pycache__/
+app/roles/__pycache__/
+app/room/__pycache__/
+app/storage/__pycache__/
+app/__pycache__/
+tests/__pycache__/
+app/agent/__pycache__/
