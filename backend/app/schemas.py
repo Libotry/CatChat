@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from typing import Any, Dict, List, Optional
 
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, ConfigDict, Field
 
 
 class CreateRoomRequest(BaseModel):
@@ -65,13 +65,23 @@ class CreateAIRoomRequest(BaseModel):
 
 
 class RegisterAgentRequest(BaseModel):
+    model_config = ConfigDict(protected_namespaces=())
     player_id: str
     ipc_endpoint: str
     model_type: str
     timeout_sec: int = Field(default=15, ge=3, le=60)
 
 
+class RegisterAgentGlobalRequest(BaseModel):
+    room_id: str
+    player_id: str
+    endpoint: str
+    model: str
+    timeout_sec: int = Field(default=15, ge=3, le=60)
+
+
 class HotSwapAgentRequest(BaseModel):
+    model_config = ConfigDict(protected_namespaces=())
     player_id: str
     ipc_endpoint: str
     model_type: str
@@ -98,6 +108,20 @@ class AIHealthResponse(BaseModel):
     all_ready: bool
     agents: Dict[str, Any]
     metrics: Dict[str, Any]
+
+
+class AgentStatusResponse(BaseModel):
+    room_id: str
+    agents: Dict[str, Any]
+    metrics: Dict[str, Any]
+
+
+class RoomConfigResponse(BaseModel):
+    room_id: str
+    player_count: int
+    role_distribution: Dict[str, int]
+    night_order: List[str]
+    warnings: List[str]
 
 
 class ReplayResponse(BaseModel):

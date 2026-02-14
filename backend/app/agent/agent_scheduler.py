@@ -20,6 +20,8 @@ class AgentRegistration:
     failed_count: int = 0
     entrusted: bool = False
     registered_at: datetime = field(default_factory=datetime.utcnow)
+    last_heartbeat: datetime = field(default_factory=datetime.utcnow)
+    last_error: Optional[str] = None
 
 
 @dataclass(slots=True)
@@ -146,6 +148,8 @@ class AgentScheduler:
             data = self._validate_and_parse(resp.json())
             self.metrics.observe_success(latency_ms)
             agent.failed_count = 0
+            agent.last_heartbeat = datetime.utcnow()
+            agent.last_error = None
 
             self.audit_logs.append(
                 {
@@ -169,6 +173,7 @@ class AgentScheduler:
 
     def _handle_failure(self, agent: AgentRegistration, strategy_name: str, context: dict, reason: str) -> dict:
         agent.failed_count += 1
+        agent.last_error = reason
         if agent.failed_count >= 2:
             agent.online = False
             agent.entrusted = True

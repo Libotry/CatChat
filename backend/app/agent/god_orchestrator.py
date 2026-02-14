@@ -178,7 +178,7 @@ class GodOrchestrator:
         alive_players = [p for p in engine.snapshot.players.values() if p.alive]
         for player in alive_players:
             visible = self.perspective.build_visible_state(engine, player.player_id)
-            await self.scheduler.trigger_agent_action(
+            result = await self.scheduler.trigger_agent_action(
                 player_id=player.player_id,
                 session_id=engine.snapshot.room_id,
                 role=player.role.value,
@@ -186,6 +186,17 @@ class GodOrchestrator:
                 visible_state=visible,
                 prompt_template=self.templates.day_discuss,
                 strategy_name="day_discuss",
+            )
+            engine._audit(
+                "agent_speech",
+                player.player_id,
+                {
+                    "phase": Phase.DAY_DISCUSS.value,
+                    "role": player.role.value,
+                    "content": result.get("reasoning", ""),
+                    "is_fallback": bool(result.get("fallback_reason")),
+                    "fallback_reason": result.get("fallback_reason"),
+                },
             )
 
     async def _run_day_vote(self, engine: GameEngine) -> None:
@@ -206,6 +217,17 @@ class GodOrchestrator:
                 engine.submit_vote(player.player_id, target)
             except ValueError:
                 continue
+            engine._audit(
+                "agent_speech",
+                player.player_id,
+                {
+                    "phase": Phase.DAY_VOTE.value,
+                    "role": player.role.value,
+                    "content": result.get("reasoning", ""),
+                    "is_fallback": bool(result.get("fallback_reason")),
+                    "fallback_reason": result.get("fallback_reason"),
+                },
+            )
 
     async def _run_hunter_if_needed(self, engine: GameEngine) -> None:
         hunter = next(

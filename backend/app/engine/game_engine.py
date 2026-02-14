@@ -511,6 +511,19 @@ class GameEngine:
         return player
 
     def public_state(self) -> dict:
+        speech_history = [
+            {
+                "player_id": row.get("actor_id"),
+                "phase": row.get("payload", {}).get("phase"),
+                "role": row.get("payload", {}).get("role"),
+                "content": row.get("payload", {}).get("content", ""),
+                "is_fallback": row.get("payload", {}).get("is_fallback", False),
+                "timestamp": row.get("ts"),
+            }
+            for row in self.snapshot.action_audit_log
+            if row.get("event_type") == "agent_speech"
+        ]
+
         return {
             "room_id": self.snapshot.room_id,
             "owner_id": self.snapshot.owner_id,
@@ -536,6 +549,7 @@ class GameEngine:
                 pid: cause.value
                 for pid, cause in self.snapshot.round_context.deaths_this_round.items()
             },
+            "speech_history": speech_history[-20:],
             "is_peace_night": self.snapshot.phase in {Phase.DAY_ANNOUNCE, Phase.DAY_DISCUSS, Phase.DAY_VOTE}
             and not self.snapshot.round_context.deaths_this_round,
         }

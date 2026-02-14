@@ -313,6 +313,27 @@
         .system-message.pipeline-dev-msg { background: linear-gradient(135deg, #2563eb, #4f46e5); color: white; }
         .system-message.pipeline-review-msg { background: linear-gradient(135deg, #d97706, #f59e0b); color: #1e293b; }
         .system-message.pipeline-test-msg { background: linear-gradient(135deg, #059669, #10b981); color: white; }
+
+        /* Monitor Panel */
+        .monitor-panel { margin: 0 20px 12px; padding: 14px; background: linear-gradient(135deg, #111827, #1f2937); border-radius: var(--radius-sm); color: white; display: none; }
+        .monitor-panel.active { display: block; }
+        .mn-title { font-size: 14px; font-weight: 600; margin-bottom: 10px; }
+        .mn-info { font-size: 12px; color: rgba(255,255,255,0.72); margin-bottom: 10px; line-height: 1.5; }
+        .mn-row { display: flex; gap: 8px; margin-bottom: 8px; }
+        .mn-row .form-group { margin-bottom: 0; flex: 1; }
+        .mn-row input, .mn-row select { width: 100%; padding: 8px 10px; border-radius: 8px; border: 1px solid rgba(255,255,255,0.15); background: rgba(255,255,255,0.08); color: white; font-size: 12px; font-family: inherit; }
+        .mn-row input::placeholder { color: rgba(255,255,255,0.4); }
+        .mn-actions { display: flex; gap: 8px; flex-wrap: wrap; margin-bottom: 8px; }
+        .mn-btn { padding: 7px 12px; border: none; border-radius: 8px; font-size: 12px; font-weight: 600; cursor: pointer; transition: all 0.2s; font-family: inherit; }
+        .mn-btn-main { background: linear-gradient(135deg, #06b6d4, #3b82f6); color: white; }
+        .mn-btn-sub { background: rgba(255,255,255,0.16); color: white; }
+        .mn-btn:disabled { opacity: 0.45; cursor: not-allowed; }
+        .mn-status { display: grid; grid-template-columns: 1fr 1fr; gap: 8px; margin-top: 8px; }
+        .mn-card { background: rgba(255,255,255,0.08); border-radius: 8px; padding: 8px; font-size: 11px; line-height: 1.5; max-height: 120px; overflow-y: auto; }
+        .mn-card-title { font-size: 11px; font-weight: 600; color: rgba(255,255,255,0.78); margin-bottom: 4px; }
+        .mn-list-item { font-size: 11px; line-height: 1.45; margin-bottom: 4px; word-break: break-all; }
+        .mn-log { max-height: 120px; overflow-y: auto; }
+        .mn-config { white-space: pre-wrap; word-break: break-word; font-family: 'Consolas','Monaco',monospace; font-size: 10px; }
     </style>
 </head>
 <body>
@@ -330,6 +351,7 @@
                 <div class="mode-card" data-mode="debate" onclick="switchMode('debate')"><div class="mode-icon">🎯</div><div class="mode-label">辩论赛</div></div>
                 <div class="mode-card" data-mode="werewolf" onclick="switchMode('werewolf')"><div class="mode-icon">🐺</div><div class="mode-label">狼人杀</div></div>
                 <div class="mode-card" data-mode="pipeline" onclick="switchMode('pipeline')"><div class="mode-icon">🏗️</div><div class="mode-label">流水线</div></div>
+                <div class="mode-card" data-mode="monitor" onclick="switchMode('monitor')"><div class="mode-icon">🛰️</div><div class="mode-label">监控模式</div></div>
             </div>
         </div>
         <div class="debate-panel" id="debatePanel">
@@ -364,6 +386,7 @@
                 <button class="wp-btn wp-btn-start" id="wpStartBtn" onclick="werewolfStart()">🎮 开始游戏</button>
                 <button class="wp-btn wp-btn-next" id="wpNextBtn" onclick="werewolfNextPhase()" disabled>⏭ 下一阶段</button>
                 <button class="wp-btn wp-btn-reveal" id="wpRevealBtn" onclick="werewolfRevealAll()" disabled>👁 公开角色</button>
+                <button class="wp-btn wp-btn-reveal" id="wpLinkBtn" onclick="werewolfToggleBackendLink()">🔗 联动后端</button>
                 <button class="wp-btn wp-btn-end" id="wpEndBtn" onclick="werewolfEnd()" disabled>⏹ 结束游戏</button>
             </div>
             <div class="wp-status" id="wpStatus" style="display:none;"></div>
@@ -380,6 +403,33 @@
                 <button class="pp-btn pp-btn-reset" id="ppResetBtn" onclick="pipelineReset()" disabled>🔄 重置</button>
             </div>
             <div class="pp-status" id="ppStatus" style="display:none;"></div>
+        </div>
+        <div class="monitor-panel" id="monitorPanel">
+            <div class="mn-title">🛰️ 上帝监控台</div>
+            <div class="mn-info">连接后端 REST + WebSocket，实时查看阶段、猫猫状态与发言时间轴。</div>
+            <div class="mn-row">
+                <div class="form-group"><label style="color:rgba(255,255,255,0.72);font-size:12px;">后端地址</label><input id="monitorApiBase" type="text" placeholder="http://127.0.0.1:8000"/></div>
+                <div class="form-group"><label style="color:rgba(255,255,255,0.72);font-size:12px;">玩家数</label><select id="monitorPlayerCount"><option value="8">8</option><option value="9">9</option><option value="10">10</option><option value="11" selected>11</option><option value="12">12</option></select></div>
+            </div>
+            <div class="mn-row">
+                <div class="form-group"><label style="color:rgba(255,255,255,0.72);font-size:12px;">房间ID</label><input id="monitorRoomId" type="text" placeholder="创建后自动填充"/></div>
+                <div class="form-group"><label style="color:rgba(255,255,255,0.72);font-size:12px;">视角</label><select id="monitorViewMode" onchange="monitorChangeView()"><option value="god">god</option></select></div>
+            </div>
+            <div class="mn-actions">
+                <button class="mn-btn mn-btn-main" onclick="monitorCreateRoom()">🏠 创建AI房间</button>
+                <button class="mn-btn mn-btn-main" onclick="monitorConnectWs()">🔌 连接WS</button>
+                <button class="mn-btn mn-btn-sub" onclick="monitorStartGame()">▶️ 开始游戏</button>
+                <button class="mn-btn mn-btn-sub" onclick="monitorAdvance()">⏭️ 推进阶段</button>
+                <button class="mn-btn mn-btn-sub" onclick="monitorLoadConfig()">📦 配置快照</button>
+                <button class="mn-btn mn-btn-sub" onclick="monitorLoadAgents()">🩺 Agent状态</button>
+            </div>
+            <div class="mn-status">
+                <div class="mn-card"><div class="mn-card-title">全局状态</div><div id="monitorGlobal">未连接</div></div>
+                <div class="mn-card"><div class="mn-card-title">健康矩阵</div><div id="monitorHealth" class="mn-log"></div></div>
+                <div class="mn-card"><div class="mn-card-title">阶段日志</div><div id="monitorPhaseLog" class="mn-log"></div></div>
+                <div class="mn-card"><div class="mn-card-title">发言时间轴</div><div id="monitorSpeech" class="mn-log"></div></div>
+            </div>
+            <div class="mn-card" style="margin-top:8px;"><div class="mn-card-title">配置快照</div><div id="monitorConfig" class="mn-config">暂无</div></div>
         </div>
         <button class="add-cat-btn" onclick="openAddCatModal()"><span>➕</span> 添加一只猫猫</button>
         <div class="import-export-bar">

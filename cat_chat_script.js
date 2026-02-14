@@ -20,10 +20,127 @@ const WEREWOLF_ROLES = [
 let cats = [], messages = [];
 let selectedEmoji = '🐱', selectedColor = '#f582ae', selectedProvider = 'openai';
 let gameMode = 'discuss', judgeView = true;
-let wfState = { active:false, phase:'idle', round:0, roles:{}, eliminated:[], phaseMessages:[] };
+let wfState = {
+    active:false,
+    phase:'idle',
+    round:0,
+    roles:{},
+    eliminated:[],
+    phaseMessages:[],
+    backendLinked:false,
+    linkedRoomId:''
+};
 let plState = { active:false, phase:'idle', requirement:'', roles:{}, results:{} };
 let cliProxy = { enabled: false, url: 'http://localhost:3456', connected: false };
 let dbState = { active:false, round:0, maxRounds:2, turnIndex:0, order:[], queue:[], speaking:false };
+let monitorState = {
+    apiBase: 'http://127.0.0.1:8000',
+    roomId: '',
+    ownerId: 'cat_01',
+    playerCount: 11,
+    viewMode: 'god',
+    ws: null,
+    isConnected: false,
+    phaseLog: [],
+    speechTimeline: [],
+    speechSeenKeys: {},
+    speechRenderedKeys: {},
+    players: []
+};
+
+function werewolfMapBackendPhase(phase) {
+    if (!phase) return 'night';
+    if (phase.indexOf('night_') === 0) return 'night';
+    if (phase === 'day_vote') return 'vote';
+    if (phase === 'day_announce' || phase === 'day_discuss') return 'day';
+    if (phase === 'game_over') return 'day';
+    return 'night';
+}
+
+function werewolfSyncButtonsByState() {
+    var startBtn = document.getElementById('wpStartBtn');
+    var nextBtn = document.getElementById('wpNextBtn');
+    var revealBtn = document.getElementById('wpRevealBtn');
+    var endBtn = document.getElementById('wpEndBtn');
+    if (!startBtn || !nextBtn || !revealBtn || !endBtn) return;
+    startBtn.disabled = wfState.active;
+    nextBtn.disabled = !wfState.active;
+    endBtn.disabled = !wfState.active;
+    revealBtn.disabled = wfState.backendLinked || !wfState.active;
+}
+
+function werewolfRefreshLinkButton() {
+    var btn = document.getElementById('wpLinkBtn');
+    if (!btn) return;
+    if (wfState.backendLinked) {
+        btn.textContent = '🔗 已联动';
+        btn.style.boxShadow = '0 0 0 2px rgba(59,130,246,0.35)';
+    } else {
+        btn.textContent = '🔗 联动后端';
+        btn.style.boxShadow = '';
+    }
+}
+
+function werewolfSyncFromBackendState(state) {
+    if (!wfState.backendLinked) return;
+    if (wfState.linkedRoomId && state.room_id && state.room_id !== wfState.linkedRoomId) return;
+
+    var players = state.players || [];
+    wfState.active = !!state.started && !state.game_over;
+    wfState.phase = werewolfMapBackendPhase(state.phase);
+    wfState.round = state.round_no || wfState.round || 1;
+    wfState.eliminated = players.filter(function(p) { return !p.alive; }).map(function(p) { return p.player_id; });
+
+    werewolfSyncButtonsByState();
+    updateWerewolfStatus();
+
+    if (state.game_over) {
+        addSystemMessage('🏁 联动房间已结束，胜利方：' + (state.winner || '未知'), 'vote-msg');
+    }
+}
+
+function werewolfPseudoCat(playerId) {
+    var idx = Math.abs((playerId || '').split('').reduce(function(acc, ch) {
+        return acc + ch.charCodeAt(0);
+    }, 0)) % catColors.length;
+    return {
+        id: 'linked_' + playerId,
+        name: playerId,
+        emoji: '🐾',
+        color: catColors[idx]
+    };
+}
+
+function werewolfRenderLinkedSpeech(entry) {
+    if (!entry || !entry.player_id) return;
+    if (gameMode !== 'werewolf' || !wfState.backendLinked) return;
+    var cat = werewolfPseudoCat(entry.player_id);
+    var isNight = (entry.phase || '').indexOf('night_') === 0;
+    addCatMessage(cat, entry.content || '', isNight);
+}
+
+function werewolfToggleBackendLink() {
+    var roomId = monitorRoomId();
+    if (!wfState.backendLinked) {
+        if (!roomId) {
+            showToast('⚠️ 请先在监控模式创建/填写房间 ID');
+            return;
+        }
+        wfState.backendLinked = true;
+        wfState.linkedRoomId = roomId;
+        monitorState.speechRenderedKeys = {};
+        addSystemMessage('🔗 狼人杀模式已联动后端房间：' + roomId, 'pipeline-msg');
+        if (!monitorState.isConnected || monitorState.roomId !== roomId) {
+            monitorConnectWs();
+        }
+    } else {
+        wfState.backendLinked = false;
+        wfState.linkedRoomId = '';
+        addSystemMessage('⛓️ 已取消狼人杀与监控房间联动。', 'pipeline-msg');
+    }
+    werewolfRefreshLinkButton();
+    werewolfSyncButtonsByState();
+}
 
 // Pipeline role definitions with preset system prompts
 var PIPELINE_ROLES = {
@@ -64,6 +181,8 @@ function init() {
     renderMembers();
     addSystemMessage('欢迎来到喵星人聊天室！添加你的猫猫，开始聊天吧～ 🐾');
     pipelineUpdateRoleAssign();
+    monitorInit();
+    werewolfRefreshLinkButton();
 }
 
 // ====================== Pickers ======================
@@ -133,11 +252,13 @@ function switchMode(mode) {
     var wp = document.getElementById('werewolfPanel');
     var pp = document.getElementById('pipelinePanel');
     var dp = document.getElementById('debatePanel');
+    var mp = document.getElementById('monitorPanel');
     var jt = document.getElementById('judgeToggle');
     if (mode === 'debate') {
         dp.classList.add('active');
         wp.classList.remove('active');
         pp.classList.remove('active');
+        mp.classList.remove('active');
         jt.style.display = 'none';
         document.getElementById('chatTitle').textContent = '🎯 猫猫大厅 · 辩论赛模式';
         document.getElementById('messageInput').placeholder = '输入辩题，猫猫们将轮流发言...';
@@ -147,25 +268,39 @@ function switchMode(mode) {
         dp.classList.remove('active');
         wp.classList.add('active');
         pp.classList.remove('active');
+        mp.classList.remove('active');
         jt.style.display = 'inline-flex';
         judgeView = true;
         jt.classList.add('active');
         document.getElementById('chatTitle').textContent = '🐺 猫猫大厅 · 狼人杀模式';
         document.getElementById('messageInput').placeholder = '以法官身份发言...';
         addSystemMessage('🐺 已切换到狼人杀模式！铲屎官将担任法官。');
+        werewolfRefreshLinkButton();
+        werewolfSyncButtonsByState();
     } else if (mode === 'pipeline') {
         dp.classList.remove('active');
         wp.classList.remove('active');
         pp.classList.add('active');
+        mp.classList.remove('active');
         jt.style.display = 'none';
         document.getElementById('chatTitle').textContent = '🏗️ 猫猫大厅 · 代码流水线模式';
         document.getElementById('messageInput').placeholder = '输入补充需求或反馈...';
         addSystemMessage('🏗️ 已切换到代码全栈流水线模式！铲屎官当产品经理下需求，猫猫们将依次完成开发、检视、测试。');
         pipelineUpdateRoleAssign();
+    } else if (mode === 'monitor') {
+        dp.classList.remove('active');
+        wp.classList.remove('active');
+        pp.classList.remove('active');
+        mp.classList.add('active');
+        jt.style.display = 'none';
+        document.getElementById('chatTitle').textContent = '🛰️ 猫猫大厅 · 上帝监控模式';
+        document.getElementById('messageInput').placeholder = '监控模式下请使用左侧控制台按钮...';
+        addSystemMessage('🛰️ 已切换到监控模式！可以创建 AI 房间并连接实时事件流。');
     } else {
         dp.classList.remove('active');
         wp.classList.remove('active');
         pp.classList.remove('active');
+        mp.classList.remove('active');
         jt.style.display = 'none';
         document.getElementById('chatTitle').textContent = '🏠 猫猫大厅 · 讨论模式';
         document.getElementById('messageInput').placeholder = '说点什么吧，猫猫们在等你喵～';
@@ -180,6 +315,24 @@ function toggleJudgeView() {
 
 // ====================== Werewolf ======================
 function werewolfStart() {
+    if (wfState.backendLinked) {
+        var roomId = monitorRoomId();
+        if (!roomId) {
+            showToast('⚠️ 联动模式下需要先配置房间 ID');
+            return;
+        }
+        if (!monitorState.isConnected || monitorState.roomId !== roomId) {
+            monitorConnectWs();
+        }
+        monitorStartGame();
+        setTimeout(function() {
+            monitorHttp('/api/rooms/' + encodeURIComponent(roomId)).then(function(state) {
+                monitorApplyRoomState(state);
+            }).catch(function() {});
+        }, 500);
+        addSystemMessage('🚀 已通过后端联动启动狼人杀：' + roomId, 'night-msg');
+        return;
+    }
     if (cats.length < 4) { showToast('⚠️ 至少需要 4 只猫猫才能开始！'); return; }
     var pool = buildRolePool(cats.length);
     var shuffled = cats.slice().sort(function() { return Math.random() - 0.5; });
@@ -217,6 +370,10 @@ function buildWerewolfSystemPrompt(cat, role) {
 }
 function werewolfNextPhase() {
     if (!wfState.active) return;
+    if (wfState.backendLinked) {
+        monitorAdvance();
+        return;
+    }
     var ps = ['night','day','vote'];
     var ci = ps.indexOf(wfState.phase);
     var np = ps[(ci + 1) % 3];
@@ -250,6 +407,10 @@ function promptCatsForPhase(prompt) {
     });
 }
 function werewolfRevealAll() {
+    if (wfState.backendLinked) {
+        showToast('ℹ️ 联动模式下角色由后端控制，前端不支持公开角色。');
+        return;
+    }
     if (!wfState.active) return;
     var info = '📋 角色揭示：\n';
     cats.forEach(function(c) {
@@ -260,6 +421,15 @@ function werewolfRevealAll() {
     addSystemMessage(info);
 }
 function werewolfEnd() {
+    if (wfState.backendLinked) {
+        wfState.active = false;
+        wfState.phase = 'idle';
+        wfState.eliminated = [];
+        document.getElementById('wpStatus').style.display = 'none';
+        werewolfSyncButtonsByState();
+        addSystemMessage('⏹ 已结束本地联动视图（后端房间仍可在监控模式继续观察）。');
+        return;
+    }
     wfState.active = false;
     wfState.phase = 'idle';
     document.getElementById('wpStartBtn').disabled = false;
@@ -276,9 +446,20 @@ function updateWerewolfStatus() {
     el.style.display = 'block';
     var pm = { night:'wp-phase-night', day:'wp-phase-day', vote:'wp-phase-vote' };
     var pl = { night:'🌙 夜晚', day:'☀️ 白天', vote:'🗳️ 投票' };
-    var alive = cats.filter(function(c) { return !wfState.eliminated.includes(c.id); }).length;
-    var wolves = cats.filter(function(c) { return !wfState.eliminated.includes(c.id) && wfState.roles[c.id] && wfState.roles[c.id].team === 'wolf'; }).length;
-    el.innerHTML = '<div>第 <b>' + wfState.round + '</b> 轮 · <span class="wp-phase-badge ' + pm[wfState.phase] + '">' + pl[wfState.phase] + '</span></div><div style="margin-top:4px;">存活：' + alive + ' 只 · 狼人：' + wolves + ' 只</div>';
+    var alive;
+    var wolves;
+    if (wfState.backendLinked && monitorState.roomId) {
+        var backendPlayers = monitorState.players || [];
+        alive = backendPlayers.length - wfState.eliminated.length;
+        wolves = '后端裁定';
+    } else {
+        alive = cats.filter(function(c) { return !wfState.eliminated.includes(c.id); }).length;
+        wolves = cats.filter(function(c) {
+            return !wfState.eliminated.includes(c.id) && wfState.roles[c.id] && wfState.roles[c.id].team === 'wolf';
+        }).length;
+    }
+    var linkLabel = wfState.backendLinked ? ' · 🔗联动中' : '';
+    el.innerHTML = '<div>第 <b>' + wfState.round + '</b> 轮 · <span class="wp-phase-badge ' + pm[wfState.phase] + '">' + pl[wfState.phase] + '</span>' + linkLabel + '</div><div style="margin-top:4px;">存活：' + alive + ' 只 · 狼人：' + wolves + '</div>';
 }
 function refreshWerewolfVisibility() {
     document.querySelectorAll('.wf-msg').forEach(function(el) {
@@ -808,6 +989,12 @@ function sendMessage() {
     var input = document.getElementById('messageInput');
     var text = input.value.trim();
     if (!text) return;
+    if (gameMode === 'monitor') {
+        showToast('🛰️ 监控模式请使用左侧控制台操作。');
+        input.value = '';
+        autoResize(input);
+        return;
+    }
     input.value = '';
     autoResize(input);
     addUserMessage(text);
@@ -1207,6 +1394,284 @@ function proxyFetch(url, options) {
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify(proxyBody)
     });
+}
+
+// ====================== Monitor Mode (Werewolf Backend) ======================
+function monitorInit() {
+    var apiInput = document.getElementById('monitorApiBase');
+    var countInput = document.getElementById('monitorPlayerCount');
+    if (!apiInput || !countInput) return;
+    apiInput.value = monitorState.apiBase;
+    countInput.value = String(monitorState.playerCount);
+    monitorRenderGlobal('未连接');
+}
+
+function monitorNormalizeBase(url) {
+    return (url || '').trim().replace(/\/+$/, '');
+}
+
+function monitorHttp(path, options) {
+    monitorState.apiBase = monitorNormalizeBase(document.getElementById('monitorApiBase').value) || 'http://127.0.0.1:8000';
+    document.getElementById('monitorApiBase').value = monitorState.apiBase;
+    var req = Object.assign({ method: 'GET', headers: { 'Content-Type': 'application/json' } }, options || {});
+    return fetch(monitorState.apiBase + path, req).then(function(res) {
+        if (!res.ok) {
+            return res.text().then(function(t) { throw new Error('HTTP ' + res.status + ': ' + t.substring(0, 140)); });
+        }
+        return res.json();
+    });
+}
+
+function monitorCreateRoom() {
+    var playerCount = parseInt(document.getElementById('monitorPlayerCount').value, 10) || 11;
+    monitorState.playerCount = playerCount;
+    monitorHttp('/api/ai/rooms', {
+        method: 'POST',
+        body: JSON.stringify({ owner_nickname: 'cat_01', player_count: playerCount })
+    }).then(function(data) {
+        monitorState.roomId = data.room_id;
+        monitorState.ownerId = data.owner_id || 'cat_01';
+        monitorState.players = data.players || [];
+        document.getElementById('monitorRoomId').value = monitorState.roomId;
+        monitorSyncViewOptions();
+        monitorRenderGlobal('房间已创建：' + monitorState.roomId + '（' + playerCount + '人）');
+        addSystemMessage('🛰️ 监控房间创建成功：' + monitorState.roomId, 'pipeline-msg');
+        showToast('✅ AI 房间已创建');
+    }).catch(function(err) {
+        showToast('❌ 创建房间失败：' + err.message);
+        monitorRenderGlobal('创建失败：' + err.message);
+    });
+}
+
+function monitorRoomId() {
+    var id = (document.getElementById('monitorRoomId').value || '').trim();
+    if (!id) id = monitorState.roomId;
+    monitorState.roomId = id;
+    return id;
+}
+
+function monitorWsUrl(roomId, playerId) {
+    var base = monitorState.apiBase || 'http://127.0.0.1:8000';
+    var wsBase = base.replace(/^http:/i, 'ws:').replace(/^https:/i, 'wss:');
+    return wsBase + '/ws/' + encodeURIComponent(roomId) + '/' + encodeURIComponent(playerId);
+}
+
+function monitorConnectWs() {
+    var roomId = monitorRoomId();
+    if (!roomId) { showToast('⚠️ 请先创建或填写房间 ID'); return; }
+    if (monitorState.ws) {
+        try { monitorState.ws.close(); } catch (e) {}
+        monitorState.ws = null;
+    }
+    var playerId = monitorState.ownerId || 'cat_01';
+    var wsUrl = monitorWsUrl(roomId, playerId);
+    var ws = new WebSocket(wsUrl);
+    monitorState.ws = ws;
+    monitorRenderGlobal('正在连接：' + wsUrl);
+
+    ws.onopen = function() {
+        monitorState.isConnected = true;
+        ws.send(JSON.stringify({ type: 'subscribe', room_id: roomId, view_mode: monitorState.viewMode || 'god' }));
+        monitorRenderGlobal('WS已连接 · room=' + roomId + ' · view=' + (monitorState.viewMode || 'god'));
+        showToast('🔌 WS 连接成功');
+    };
+
+    ws.onmessage = function(event) {
+        try {
+            var msg = JSON.parse(event.data);
+            monitorHandleWsEvent(msg);
+        } catch (e) {
+            console.error('monitor ws parse error', e);
+        }
+    };
+
+    ws.onclose = function() {
+        monitorState.isConnected = false;
+        monitorRenderGlobal('WS已断开');
+    };
+
+    ws.onerror = function() {
+        monitorState.isConnected = false;
+        monitorRenderGlobal('WS连接异常');
+    };
+}
+
+function monitorHandleWsEvent(msg) {
+    var evt = msg.event;
+    var payload = msg.payload || {};
+    if (evt === 'subscribed') {
+        monitorState.viewMode = payload.view_mode || monitorState.viewMode;
+        document.getElementById('monitorViewMode').value = monitorState.viewMode;
+        monitorRenderGlobal('订阅成功 · view=' + monitorState.viewMode);
+        return;
+    }
+    if (evt === 'view_changed') {
+        monitorState.viewMode = payload.view_mode || monitorState.viewMode;
+        monitorRenderGlobal('视角已切换：' + monitorState.viewMode);
+        return;
+    }
+    if (evt === 'room_state') {
+        monitorApplyRoomState(payload);
+        return;
+    }
+    if (evt === 'phase_changed') {
+        monitorAddPhaseLog('[' + getTimeStr() + '] ' + (payload.phase || 'unknown') + ' · active=' + ((payload.active_players || []).join(',') || '-'));
+        if (payload.god_view && monitorState.viewMode === 'god') {
+            monitorAddPhaseLog('🐺 狼队目标: ' + JSON.stringify(payload.god_view));
+        }
+        return;
+    }
+    if (evt === 'agent_status_update') {
+        monitorApplyAgentStatusPayload(payload);
+        return;
+    }
+}
+
+function monitorApplyRoomState(state) {
+    monitorState.roomId = state.room_id || monitorState.roomId;
+    if (state.owner_id) monitorState.ownerId = state.owner_id;
+    var rid = document.getElementById('monitorRoomId');
+    if (rid && monitorState.roomId) rid.value = monitorState.roomId;
+    var players = state.players || [];
+    monitorState.players = players.map(function(p) { return p.player_id; });
+    monitorSyncViewOptions();
+    var alive = players.filter(function(p) { return p.alive; }).length;
+    var total = players.length;
+    monitorRenderGlobal('phase=' + state.phase + ' · round=' + (state.round_no || 0) + ' · alive=' + alive + '/' + total + ' · game_over=' + (!!state.game_over));
+    if (Array.isArray(state.speech_history)) {
+        state.speech_history.forEach(function(s) {
+            var key = [s.timestamp || '', s.player_id || '', s.content || ''].join('|');
+            if (!monitorState.speechSeenKeys[key]) {
+                monitorState.speechSeenKeys[key] = true;
+                monitorState.speechTimeline.push(s);
+                if (!monitorState.speechRenderedKeys[key]) {
+                    monitorState.speechRenderedKeys[key] = true;
+                    werewolfRenderLinkedSpeech(s);
+                }
+            }
+        });
+        if (monitorState.speechTimeline.length > 80) {
+            monitorState.speechTimeline = monitorState.speechTimeline.slice(-80);
+        }
+        monitorRenderSpeech();
+    }
+    werewolfSyncFromBackendState(state);
+}
+
+function monitorApplyAgentStatusPayload(payload) {
+    var row = {
+        player_id: payload.player_id,
+        online: payload.status === 'online',
+        status: payload.status,
+        error_msg: payload.error_msg || '',
+        last_heartbeat: payload.last_heartbeat || ''
+    };
+    var container = document.getElementById('monitorHealth');
+    var lines = container.getAttribute('data-lines') ? JSON.parse(container.getAttribute('data-lines')) : [];
+    var text = row.player_id + ' · ' + row.status + (row.error_msg ? (' · ' + row.error_msg) : '');
+    lines.unshift(text);
+    lines = lines.slice(0, 24);
+    container.setAttribute('data-lines', JSON.stringify(lines));
+    container.innerHTML = lines.map(function(l) { return '<div class="mn-list-item">' + escapeHtml(l) + '</div>'; }).join('') || '<div class="mn-list-item">暂无</div>';
+}
+
+function monitorStartGame() {
+    var roomId = monitorRoomId();
+    if (!roomId) { showToast('⚠️ 请先创建房间'); return; }
+    var owner = monitorState.ownerId || 'cat_01';
+    monitorHttp('/api/rooms/' + encodeURIComponent(roomId) + '/start?owner_id=' + encodeURIComponent(owner), {
+        method: 'POST'
+    }).then(function(data) {
+        monitorRenderGlobal('游戏已启动 · phase=' + data.phase);
+        showToast('▶️ 游戏已启动');
+    }).catch(function(err) {
+        showToast('❌ 启动失败：' + err.message);
+        monitorAddPhaseLog('启动失败：' + err.message);
+    });
+}
+
+function monitorAdvance() {
+    var roomId = monitorRoomId();
+    if (!roomId) { showToast('⚠️ 请先创建房间'); return; }
+    monitorHttp('/api/rooms/' + encodeURIComponent(roomId) + '/advance', {
+        method: 'POST'
+    }).then(function(data) {
+        monitorApplyRoomState(data);
+        monitorAddPhaseLog('手动推进 -> ' + data.phase);
+    }).catch(function(err) {
+        showToast('❌ 推进失败：' + err.message);
+    });
+}
+
+function monitorLoadConfig() {
+    var roomId = monitorRoomId();
+    if (!roomId) { showToast('⚠️ 请先创建房间'); return; }
+    monitorHttp('/api/rooms/' + encodeURIComponent(roomId) + '/config').then(function(data) {
+        document.getElementById('monitorConfig').textContent = JSON.stringify(data, null, 2);
+    }).catch(function(err) {
+        showToast('❌ 获取配置失败：' + err.message);
+    });
+}
+
+function monitorLoadAgents() {
+    var roomId = monitorRoomId();
+    if (!roomId) { showToast('⚠️ 请先创建房间'); return; }
+    monitorHttp('/api/agents/status?room_id=' + encodeURIComponent(roomId)).then(function(data) {
+        var agents = data.agents || {};
+        var rows = Object.keys(agents).sort().map(function(pid) {
+            var item = agents[pid] || {};
+            var status = item.online ? 'online' : 'offline';
+            if (item.error_msg) status = 'error';
+            return pid + ' · ' + status + ' · failed=' + (item.failed_count || 0);
+        });
+        var container = document.getElementById('monitorHealth');
+        container.innerHTML = rows.map(function(r) { return '<div class="mn-list-item">' + escapeHtml(r) + '</div>'; }).join('') || '<div class="mn-list-item">暂无</div>';
+        container.setAttribute('data-lines', JSON.stringify(rows));
+    }).catch(function(err) {
+        showToast('❌ 获取状态失败：' + err.message);
+    });
+}
+
+function monitorChangeView() {
+    var mode = document.getElementById('monitorViewMode').value;
+    monitorState.viewMode = mode;
+    if (!monitorState.ws || monitorState.ws.readyState !== WebSocket.OPEN) {
+        monitorRenderGlobal('视角已设置（待连接后生效）：' + mode);
+        return;
+    }
+    monitorState.ws.send(JSON.stringify({ type: 'change_view', mode: mode }));
+}
+
+function monitorSyncViewOptions() {
+    var sel = document.getElementById('monitorViewMode');
+    if (!sel) return;
+    var options = ['god'].concat((monitorState.players || []).map(function(pid) { return 'player:' + pid; }));
+    var current = monitorState.viewMode || 'god';
+    sel.innerHTML = options.map(function(v) { return '<option value="' + v + '">' + v + '</option>'; }).join('');
+    if (options.indexOf(current) === -1) current = 'god';
+    sel.value = current;
+    monitorState.viewMode = current;
+}
+
+function monitorAddPhaseLog(text) {
+    monitorState.phaseLog.unshift(text);
+    monitorState.phaseLog = monitorState.phaseLog.slice(0, 40);
+    var el = document.getElementById('monitorPhaseLog');
+    el.innerHTML = monitorState.phaseLog.map(function(row) { return '<div class="mn-list-item">' + escapeHtml(row) + '</div>'; }).join('') || '<div class="mn-list-item">暂无</div>';
+}
+
+function monitorRenderSpeech() {
+    var el = document.getElementById('monitorSpeech');
+    var rows = monitorState.speechTimeline.slice(-30).reverse().map(function(s) {
+        var phase = s.phase ? ('[' + s.phase + '] ') : '';
+        var fallback = s.is_fallback ? ' (fallback)' : '';
+        return '<div class="mn-list-item">' + escapeHtml((s.timestamp || '').replace('T', ' ').slice(0, 19) + ' ' + phase + (s.player_id || '?') + ': ' + (s.content || '') + fallback) + '</div>';
+    });
+    el.innerHTML = rows.join('') || '<div class="mn-list-item">暂无</div>';
+}
+
+function monitorRenderGlobal(text) {
+    document.getElementById('monitorGlobal').textContent = text;
 }
 
 // ====================== Boot ======================

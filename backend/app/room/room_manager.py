@@ -175,6 +175,64 @@ class RoomManager:
             "metrics": room.orchestrator.scheduler.metrics.to_dict(),
         }
 
+    def agents_status(self, room_id: str) -> dict:
+        room = self.must_get_room(room_id)
+        agents = room.orchestrator.scheduler.registry.all()
+        return {
+            "room_id": room_id,
+            "agents": {
+                pid: {
+                    "online": agent.online,
+                    "entrusted": agent.entrusted,
+                    "model_type": agent.model_type,
+                    "timeout_sec": agent.timeout_sec,
+                    "failed_count": agent.failed_count,
+                    "last_heartbeat": agent.last_heartbeat.isoformat(),
+                    "error_msg": agent.last_error,
+                }
+                for pid, agent in agents.items()
+            },
+            "metrics": room.orchestrator.scheduler.metrics.to_dict(),
+        }
+
+    def room_config(self, room_id: str) -> dict:
+        room = self.must_get_room(room_id)
+        config = room.engine.config
+        return {
+            "room_id": room_id,
+            "player_count": config.player_count,
+            "role_distribution": config.role_distribution,
+            "night_order": config.night_order,
+            "warnings": config.warnings,
+        }
+
+    def health_summary(self) -> dict:
+        with self._lock:
+            rooms = list(self._rooms.values())
+
+        total_agents = 0
+        online_agents = 0
+        per_room: dict[str, dict] = {}
+        for room in rooms:
+            regs = room.orchestrator.scheduler.registry.all()
+            total_agents += len(regs)
+            online = sum(1 for reg in regs.values() if reg.online)
+            online_agents += online
+            per_room[room.room_id] = {
+                "players": len(room.engine.snapshot.players),
+                "agents_registered": len(regs),
+                "agents_online": online,
+                "phase": room.engine.snapshot.phase.value,
+                "game_over": room.engine.snapshot.game_over,
+            }
+
+        return {
+            "rooms": len(rooms),
+            "agents_total": total_agents,
+            "agents_online": online_agents,
+            "rooms_detail": per_room,
+        }
+
     def replay_record(self, record_id: int) -> dict:
         record = self.repository.get_game_record(record_id)
         if not record:

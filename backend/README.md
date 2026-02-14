@@ -5,6 +5,8 @@
 - 猫猫子Agent仅负责决策生成
 - 所有状态变更由后端规则引擎裁定
 
+设计文档：`docs/werewolf_ai_cat_integration_design.md`
+
 ## 核心模块
 
 - `app/room/room_manager.py`：房间生命周期、多房间并发、AI房间与Agent注册
@@ -92,11 +94,58 @@ cd backend
 4. 开局
 5. 触发上帝Agent自动跑到结算
 
+## 前端监控模式联调（REST + WebSocket）
+
+1. 启动后端服务：
+
+```powershell
+cd backend
+python run.py
+```
+
+2. 打开项目根目录的 `cat_chat.html`，切换到 **🛰️ 监控模式**。
+3. 在“后端地址”填写 `http://127.0.0.1:8000`，点击 **创建AI房间**。
+4. 点击 **连接WS**（前端会自动发送 `subscribe`）。
+5. 可选：
+  - 点击 **开始游戏**（调用 `POST /api/rooms/{room_id}/start`）
+  - 点击 **推进阶段**（调用 `POST /api/rooms/{room_id}/advance`）
+  - 切换视角（发送 `change_view`）
+  - 点击 **配置快照** / **Agent状态** 查看回显
+
+监控面板对应数据源：
+- 全局状态：`room_state`
+- 阶段日志：`phase_changed`
+- 健康矩阵：`agent_status_update` + `GET /api/agents/status`
+- 发言时间轴：`room_state.speech_history`
+
+### 监控模式自动烟测脚本
+
+```powershell
+cd backend
+pip install -r requirements.txt
+python scripts/ws_monitor_smoke_test.py --base-url http://127.0.0.1:8000 --player-count 11
+```
+
+脚本会自动验证三段关键链路：
+- `subscribe` => `subscribed` + `room_state`
+- `change_view` => `view_changed` + `room_state`
+- `advance`(WebSocket事件) => `phase_changed` + `room_state`
+
+手工验收清单见：`docs/monitor_mode_acceptance_checklist.md`
+
 ## 测试
 
 ```bash
 cd backend
 pytest -q
+```
+
+按需执行监控模式集成烟测（需要后端已启动）：
+
+```powershell
+cd backend
+$env:RUN_MONITOR_INTEGRATION="1"
+pytest -q -m integration
 ```
 
 - `tests/test_night_resolution.py`：夜晚结算核心规则
