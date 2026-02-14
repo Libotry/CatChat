@@ -7,19 +7,23 @@ from typing import Dict, Optional
 
 import httpx
 
+from app.agent.ai_god_orchestrator import AIGodOrchestrator, GodAgentConfig
 from app.agent.child_process_manager import ChildAgentProcessManager
 from app.agent.god_orchestrator import GodOrchestrator
 from app.core.game_config import default_game_config
 from app.engine.game_engine import GameEngine
 from app.storage.repository import SQLiteRepository
 
+from typing import Union
+
 
 @dataclass(slots=True)
 class Room:
     room_id: str
     engine: GameEngine
-    orchestrator: GodOrchestrator
+    orchestrator: Union[GodOrchestrator, AIGodOrchestrator]
     sockets: Dict[str, object] = field(default_factory=dict)
+    ai_god_enabled: bool = False
 
 
 class RoomManager:
@@ -61,6 +65,12 @@ class RoomManager:
         player_count: int = 12,
         custom_role_config: Optional[dict] = None,
         admin_override: bool = False,
+        ai_god: bool = False,
+        god_api_url: Optional[str] = None,
+        god_api_key: Optional[str] = None,
+        god_model_name: Optional[str] = None,
+        god_provider: Optional[str] = None,
+        god_temperature: Optional[float] = None,
     ) -> dict:
         with self._lock:
             room_id = self._new_room_id()
@@ -71,7 +81,25 @@ class RoomManager:
                 admin_override=admin_override,
             )
             engine = GameEngine(room_id=room_id, owner_id=owner_id, config=config)
-            room = Room(room_id=room_id, engine=engine, orchestrator=GodOrchestrator())
+
+            if ai_god and god_api_url and god_api_key:
+                god_cfg = GodAgentConfig(
+                    api_url=god_api_url,
+                    api_key=god_api_key,
+                    model_name=god_model_name or "gpt-4o-mini",
+                    provider=god_provider or "openai",
+                    temperature=god_temperature if god_temperature is not None else 0.7,
+                )
+                orchestrator: Union[GodOrchestrator, AIGodOrchestrator] = AIGodOrchestrator(god_config=god_cfg)
+            else:
+                orchestrator = GodOrchestrator()
+
+            room = Room(
+                room_id=room_id,
+                engine=engine,
+                orchestrator=orchestrator,
+                ai_god_enabled=ai_god and god_api_url is not None and god_api_key is not None,
+            )
             self._rooms[room_id] = room
 
             for idx in range(1, config.total_players + 1):
@@ -85,6 +113,7 @@ class RoomManager:
                 "player_count": config.player_count,
                 "role_distribution": config.role_distribution,
                 "players": [p.player_id for p in engine.snapshot.players.values()],
+                "ai_god": room.ai_god_enabled,
             }
 
     def join_room(self, room_id: str, nickname: str) -> dict:
@@ -378,7 +407,7 @@ class RoomManager:
     def ai_health(self, room_id: str) -> dict:
         room = self.must_get_room(room_id)
         agents = room.orchestrator.scheduler.registry.all()
-        return {
+        result = {
             "all_ready": room.orchestrator.all_agents_ready(room.engine),
             "agents": {
                 pid: {
@@ -392,7 +421,11 @@ class RoomManager:
                 for pid, agent in agents.items()
             },
             "metrics": room.orchestrator.scheduler.metrics.to_dict(),
+            "ai_god": room.ai_god_enabled,
         }
+        if room.ai_god_enabled and isinstance(room.orchestrator, AIGodOrchestrator):
+            result["god_narration_count"] = len(room.orchestrator.narration_log)
+        return result
 
     def agents_status(self, room_id: str) -> dict:
         room = self.must_get_room(room_id)

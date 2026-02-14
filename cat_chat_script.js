@@ -286,7 +286,16 @@ function werewolfPseudoCat(playerId) {
 }
 
 function werewolfRenderLinkedSpeech(entry) {
-    if (!entry || !entry.player_id) return;
+    if (!entry) return;
+    // Handle god_narration entries from AI God Orchestrator
+    if (entry.player_id === 'god' || entry.event === 'god_narration') {
+        var godContent = (entry.content || '').trim();
+        if (!godContent) return;
+        var prefix = entry.is_fallback ? '⚖️ 法官（托管）：' : '🤖 AI法官：';
+        addSystemMessage(prefix + godContent, 'pipeline-msg');
+        return;
+    }
+    if (!entry.player_id) return;
     var inWerewolfLinked = (gameMode === 'werewolf' && wfState.backendLinked);
     var inMonitorMode = (gameMode === 'monitor');
     if (!inWerewolfLinked && !inMonitorMode) return;
@@ -315,6 +324,36 @@ function werewolfRenderLinkedSpeech(entry) {
         }
     }
     addCatMessage(cat, '【' + phaseLabel + '】' + content, isNight);
+}
+
+function wpToggleAiGod() {
+    var checked = document.getElementById('wpAiGodToggle').checked;
+    var sec = document.getElementById('wpAiGodConfig');
+    if (sec) sec.style.display = checked ? 'block' : 'none';
+    // Sync to monitor panel checkbox
+    var mnCb = document.getElementById('monitorAiGod');
+    if (mnCb) mnCb.checked = checked;
+    var mnSec = document.getElementById('monitorGodConfig');
+    if (mnSec) mnSec.style.display = checked ? 'block' : 'none';
+    monitorState.aiGod = checked;
+    monitorPersistConfig();
+}
+
+function wpSyncGodConfig() {
+    // Sync werewolf panel god fields → monitor state
+    var fields = [
+        ['wpGodProvider', 'monitorGodProvider', 'godProvider'],
+        ['wpGodApiUrl', 'monitorGodApiUrl', 'godApiUrl'],
+        ['wpGodApiKey', 'monitorGodApiKey', 'godApiKey'],
+        ['wpGodModelName', 'monitorGodModelName', 'godModelName']
+    ];
+    fields.forEach(function(f) {
+        var val = (document.getElementById(f[0]) || {}).value || '';
+        var mnEl = document.getElementById(f[1]);
+        if (mnEl) mnEl.value = val;
+        monitorState[f[2]] = val;
+    });
+    monitorPersistConfig();
 }
 
 function werewolfToggleBackendLink() {
@@ -1272,6 +1311,8 @@ function renderMembers() {
 }
 function updateOnlineCount() {
     document.getElementById('onlineCount').textContent = '1 位铲屎官 · ' + cats.length + ' 只猫猫在线';
+    var mc = document.getElementById('memberCount');
+    if (mc) mc.textContent = cats.length;
 }
 
 // ====================== Messages ======================
@@ -1658,6 +1699,12 @@ function toggleGlobalSettings() {
 function toggleSidebar() {
     document.getElementById('sidebar').classList.toggle('open');
 }
+function toggleRightPanel() {
+    var panel = document.getElementById('rightPanel');
+    var btn = document.getElementById('memberToggle');
+    panel.classList.toggle('collapsed');
+    btn.classList.toggle('active', !panel.classList.contains('collapsed'));
+}
 function toggleCliProxy() {
     var el = document.getElementById('cliProxySettings');
     var arrow = document.getElementById('cliArrow');
@@ -1751,6 +1798,51 @@ function monitorInit() {
     if (apiKeyInput) apiKeyInput.value = monitorState.modelApiKey;
     if (modelInput) modelInput.value = monitorState.modelName;
     if (cliInput) cliInput.value = monitorState.cliCommand;
+    // Restore AI god config
+    var aiGodEl = document.getElementById('monitorAiGod');
+    if (aiGodEl) {
+        aiGodEl.checked = !!monitorState.aiGod;
+        aiGodEl.addEventListener('change', function() {
+            var show = aiGodEl.checked;
+            var sec = document.getElementById('monitorGodConfig');
+            if (sec) sec.style.display = show ? 'block' : 'none';
+            // Sync to werewolf panel
+            var wpCb = document.getElementById('wpAiGodToggle');
+            if (wpCb) wpCb.checked = show;
+            var wpSec = document.getElementById('wpAiGodConfig');
+            if (wpSec) wpSec.style.display = show ? 'block' : 'none';
+            monitorCollectInvokeConfig();
+            monitorPersistConfig();
+        });
+        var sec = document.getElementById('monitorGodConfig');
+        if (sec) sec.style.display = aiGodEl.checked ? 'block' : 'none';
+    }
+    // Also restore werewolf panel AI god toggle
+    var wpGodEl = document.getElementById('wpAiGodToggle');
+    if (wpGodEl) {
+        wpGodEl.checked = !!monitorState.aiGod;
+        var wpSec = document.getElementById('wpAiGodConfig');
+        if (wpSec) wpSec.style.display = wpGodEl.checked ? 'block' : 'none';
+    }
+    // Restore werewolf panel god config fields
+    var wpGodApiUrl = document.getElementById('wpGodApiUrl');
+    var wpGodApiKey = document.getElementById('wpGodApiKey');
+    var wpGodModelName = document.getElementById('wpGodModelName');
+    var wpGodProvider = document.getElementById('wpGodProvider');
+    if (wpGodApiUrl) wpGodApiUrl.value = monitorState.godApiUrl || '';
+    if (wpGodApiKey) wpGodApiKey.value = monitorState.godApiKey || '';
+    if (wpGodModelName) wpGodModelName.value = monitorState.godModelName || '';
+    if (wpGodProvider) wpGodProvider.value = monitorState.godProvider || 'openai';
+    var godApiUrlEl = document.getElementById('monitorGodApiUrl');
+    var godApiKeyEl = document.getElementById('monitorGodApiKey');
+    var godModelNameEl = document.getElementById('monitorGodModelName');
+    var godProviderEl = document.getElementById('monitorGodProvider');
+    var godTempEl = document.getElementById('monitorGodTemperature');
+    if (godApiUrlEl) godApiUrlEl.value = monitorState.godApiUrl || '';
+    if (godApiKeyEl) godApiKeyEl.value = monitorState.godApiKey || '';
+    if (godModelNameEl) godModelNameEl.value = monitorState.godModelName || '';
+    if (godProviderEl) godProviderEl.value = monitorState.godProvider || 'openai';
+    if (godTempEl) godTempEl.value = monitorState.godTemperature != null ? monitorState.godTemperature : 0.7;
     monitorBindConfigPersistence();
     monitorRenderGlobal('未连接');
 }
@@ -1769,6 +1861,12 @@ function monitorLoadPersistedConfig() {
         monitorState.modelApiKey = saved.modelApiKey || '';
         monitorState.modelName = saved.modelName || '';
         monitorState.cliCommand = saved.cliCommand || '';
+        monitorState.aiGod = !!saved.aiGod;
+        monitorState.godApiUrl = saved.godApiUrl || '';
+        monitorState.godApiKey = saved.godApiKey || '';
+        monitorState.godModelName = saved.godModelName || '';
+        monitorState.godProvider = saved.godProvider || 'openai';
+        monitorState.godTemperature = saved.godTemperature != null ? saved.godTemperature : 0.7;
     } catch (e) {
         console.warn('monitor config load failed', e);
     }
@@ -1784,7 +1882,13 @@ function monitorPersistConfig() {
             modelApiUrl: monitorState.modelApiUrl,
             modelApiKey: monitorState.modelApiKey,
             modelName: monitorState.modelName,
-            cliCommand: monitorState.cliCommand
+            cliCommand: monitorState.cliCommand,
+            aiGod: monitorState.aiGod || false,
+            godApiUrl: monitorState.godApiUrl || '',
+            godApiKey: monitorState.godApiKey || '',
+            godModelName: monitorState.godModelName || '',
+            godProvider: monitorState.godProvider || 'openai',
+            godTemperature: monitorState.godTemperature != null ? monitorState.godTemperature : 0.7
         };
         localStorage.setItem(MONITOR_CONFIG_STORAGE_KEY, JSON.stringify(payload));
     } catch (e) {
@@ -1801,7 +1905,13 @@ function monitorBindConfigPersistence() {
         'monitorModelApiUrl',
         'monitorModelApiKey',
         'monitorModelName',
-        'monitorCliCommand'
+        'monitorCliCommand',
+        'monitorAiGod',
+        'monitorGodApiUrl',
+        'monitorGodApiKey',
+        'monitorGodModelName',
+        'monitorGodProvider',
+        'monitorGodTemperature'
     ];
     ids.forEach(function(id) {
         var el = document.getElementById(id);
@@ -1826,12 +1936,34 @@ function monitorCollectInvokeConfig() {
     var modelName = (document.getElementById('monitorModelName').value || '').trim();
     var cliCommand = (document.getElementById('monitorCliCommand').value || '').trim();
 
+    var aiGodEl = document.getElementById('monitorAiGod');
+    var wpAiGodEl = document.getElementById('wpAiGodToggle');
+    var aiGod = (aiGodEl && aiGodEl.checked) || (wpAiGodEl && wpAiGodEl.checked) || false;
+    var godApiUrl = (document.getElementById('monitorGodApiUrl') && document.getElementById('monitorGodApiUrl').value || '').trim()
+        || (document.getElementById('wpGodApiUrl') && document.getElementById('wpGodApiUrl').value || '').trim();
+    var godApiKey = (document.getElementById('monitorGodApiKey') && document.getElementById('monitorGodApiKey').value || '').trim()
+        || (document.getElementById('wpGodApiKey') && document.getElementById('wpGodApiKey').value || '').trim();
+    var godModelName = (document.getElementById('monitorGodModelName') && document.getElementById('monitorGodModelName').value || '').trim()
+        || (document.getElementById('wpGodModelName') && document.getElementById('wpGodModelName').value || '').trim();
+    var godProvider = (document.getElementById('monitorGodProvider') && document.getElementById('monitorGodProvider').value || '')
+        || (document.getElementById('wpGodProvider') && document.getElementById('wpGodProvider').value || '')
+        || 'openai';
+    var godTempEl = document.getElementById('monitorGodTemperature');
+    var godTemperature = godTempEl ? parseFloat(godTempEl.value) : 0.7;
+    if (isNaN(godTemperature)) godTemperature = 0.7;
+
     monitorState.agentHost = host;
     monitorState.agentStartPort = startPort;
     monitorState.modelApiUrl = apiUrl;
     monitorState.modelApiKey = apiKey;
     monitorState.modelName = modelName;
     monitorState.cliCommand = cliCommand;
+    monitorState.aiGod = aiGod;
+    monitorState.godApiUrl = godApiUrl;
+    monitorState.godApiKey = godApiKey;
+    monitorState.godModelName = godModelName;
+    monitorState.godProvider = godProvider;
+    monitorState.godTemperature = godTemperature;
     monitorPersistConfig();
 
     return {
@@ -1840,7 +1972,13 @@ function monitorCollectInvokeConfig() {
         apiUrl: apiUrl,
         apiKey: apiKey,
         modelName: modelName,
-        cliCommand: cliCommand
+        cliCommand: cliCommand,
+        aiGod: aiGod,
+        godApiUrl: godApiUrl || apiUrl,
+        godApiKey: godApiKey || apiKey,
+        godModelName: godModelName || modelName,
+        godProvider: godProvider,
+        godTemperature: godTemperature
     };
 }
 
@@ -2464,9 +2602,18 @@ function monitorEnsureAiRoomFromCats() {
     var existingRoomId = monitorRoomId();
 
     var createRoom = function() {
+        var body = { owner_nickname: cats[0].name || 'cat_01', player_count: wantedCount };
+        if (cfg.aiGod) {
+            body.ai_god = true;
+            body.god_api_url = cfg.godApiUrl;
+            body.god_api_key = cfg.godApiKey;
+            body.god_model_name = cfg.godModelName;
+            body.god_provider = cfg.godProvider;
+            body.god_temperature = cfg.godTemperature;
+        }
         return monitorHttp('/api/ai/rooms', {
             method: 'POST',
-            body: JSON.stringify({ owner_nickname: cats[0].name || 'cat_01', player_count: wantedCount })
+            body: JSON.stringify(body)
         }).then(function(data) {
             monitorState.roomId = data.room_id;
             monitorState.ownerId = data.owner_id || 'cat_01';
@@ -2475,7 +2622,8 @@ function monitorEnsureAiRoomFromCats() {
             wfState.linkedRoomId = monitorState.roomId;
             document.getElementById('monitorRoomId').value = monitorState.roomId;
             monitorSyncViewOptions();
-            monitorAddPhaseLog('已按前端猫猫创建 AI 房间：' + monitorState.roomId + '（' + wantedCount + '人）');
+            var aiGodLabel = data.ai_god ? ' · 🤖AI法官' : '';
+            monitorAddPhaseLog('已按前端猫猫创建 AI 房间：' + monitorState.roomId + '（' + wantedCount + '人' + aiGodLabel + '）');
             return data;
         });
     };

@@ -93,6 +93,20 @@
         .ie-btn:hover { border-color: var(--accent-pink); color: var(--accent-pink); transform: translateY(-1px); }
         .members-title { padding: 8px 20px; font-size: 12px; color: var(--text-secondary); text-transform: uppercase; letter-spacing: 1px; font-weight: 600; }
         .members-list { flex: 1; overflow-y: auto; padding: 0 12px; }
+
+        /* Right Member Panel */
+        .right-panel { width: 260px; background: var(--bg-secondary); border-left: 1px solid rgba(0,0,0,0.06); display: flex; flex-direction: column; flex-shrink: 0; box-shadow: var(--shadow-sm); z-index: 10; transition: width 0.25s ease, opacity 0.25s ease; overflow: hidden; }
+        .right-panel.collapsed { width: 0; opacity: 0; pointer-events: none; }
+        .right-panel .members-title { padding: 16px 16px 8px; }
+        .right-panel .members-list { padding: 0 8px; }
+        .right-panel .member-card { padding: 8px 10px; margin-bottom: 4px; }
+        .right-panel .member-avatar { width: 36px; height: 36px; font-size: 18px; }
+        .right-panel .member-info { margin-left: 10px; }
+        .right-panel .member-name { font-size: 13px; }
+        .right-panel .member-role { font-size: 11px; }
+        .right-panel .member-status { left: 36px; top: 34px; }
+        .member-toggle { padding: 6px 14px; border-radius: 20px; border: 2px solid var(--accent-purple); background: none; font-size: 12px; font-weight: 600; cursor: pointer; color: var(--accent-purple); transition: all 0.2s; font-family: inherit; margin-left: 8px; }
+        .member-toggle:hover, .member-toggle.active { background: var(--accent-purple); color: white; }
         .member-card { display: flex; align-items: center; padding: 12px; border-radius: var(--radius-sm); margin-bottom: 6px; cursor: default; transition: background 0.2s; position: relative; }
         .member-card:hover { background: rgba(0,0,0,0.03); }
         .member-avatar { width: 44px; height: 44px; border-radius: 50%; display: flex; align-items: center; justify-content: center; font-size: 22px; flex-shrink: 0; box-shadow: var(--shadow-sm); }
@@ -269,6 +283,9 @@
         @media (max-width: 768px) {
             .sidebar { position: fixed; left: -100%; top: 0; height: 100vh; z-index: 100; transition: left 0.3s; }
             .sidebar.open { left: 0; }
+            .right-panel { position: fixed; right: -100%; top: 0; height: 100vh; z-index: 100; width: 260px; transition: right 0.3s; }
+            .right-panel:not(.collapsed) { right: 0; }
+            .right-panel.collapsed { right: -100%; width: 260px; opacity: 1; }
             .mobile-toggle { display: flex !important; }
             .message { max-width: 88%; }
             .provider-cards { grid-template-columns: repeat(2,1fr); }
@@ -394,6 +411,24 @@
         <div class="werewolf-panel" id="werewolfPanel">
             <div class="wp-title">🌙 狼人杀控制台</div>
             <div class="wp-info">铲屎官担任法官，可看到所有发言。<br>猫猫们互相看不到彼此发言。</div>
+            <div style="margin:8px 0;padding:8px 10px;background:rgba(255,255,255,0.06);border-radius:8px;">
+                <label style="display:flex;align-items:center;gap:8px;cursor:pointer;color:white;font-size:13px;">
+                    <input type="checkbox" id="wpAiGodToggle" onchange="wpToggleAiGod()" style="width:16px;height:16px;accent-color:#ff6b6b;"/>
+                    <span>🤖 AI 法官</span>
+                    <span style="font-size:11px;color:rgba(255,255,255,0.5);">（由LLM驱动法官旁白与裁决）</span>
+                </label>
+                <div id="wpAiGodConfig" style="display:none;margin-top:8px;">
+                    <div style="display:flex;gap:8px;flex-wrap:wrap;">
+                        <div class="form-group" style="flex:1;min-width:140px;"><label style="color:#ff6b6b;font-size:11px;">法官供应商</label><select id="wpGodProvider" onchange="wpSyncGodConfig()" style="font-size:12px;padding:4px 6px;"><option value="openai">OpenAI兼容</option><option value="claude">Claude</option></select></div>
+                        <div class="form-group" style="flex:2;min-width:180px;"><label style="color:#ff6b6b;font-size:11px;">法官 API URL</label><input id="wpGodApiUrl" type="text" placeholder="留空=复用观测台配置" onchange="wpSyncGodConfig()" style="font-size:12px;padding:4px 6px;"/></div>
+                    </div>
+                    <div style="display:flex;gap:8px;flex-wrap:wrap;margin-top:4px;">
+                        <div class="form-group" style="flex:2;min-width:180px;"><label style="color:#ff6b6b;font-size:11px;">法官 API Key</label><input id="wpGodApiKey" type="password" placeholder="留空=复用观测台配置" onchange="wpSyncGodConfig()" style="font-size:12px;padding:4px 6px;"/></div>
+                        <div class="form-group" style="flex:1;min-width:140px;"><label style="color:#ff6b6b;font-size:11px;">法官模型名称</label><input id="wpGodModelName" type="text" placeholder="留空=复用观测台" onchange="wpSyncGodConfig()" style="font-size:12px;padding:4px 6px;"/></div>
+                    </div>
+                    <div style="font-size:11px;color:#ff6b6b;opacity:0.7;margin-top:4px;">⚡ 启用后法官由AI生成旁白和裁决，留空字段会复用联动观测台的模型配置。</div>
+                </div>
+            </div>
             <div class="wp-actions">
                 <button class="wp-btn wp-btn-start" id="wpStartBtn" onclick="werewolfStart()">🎮 开始游戏</button>
                 <button class="wp-btn wp-btn-next" id="wpNextBtn" onclick="werewolfNextPhase()" disabled>⏭ 下一阶段</button>
@@ -439,6 +474,26 @@
                 <div class="form-group"><label style="color:rgba(255,255,255,0.72);font-size:12px;">模型名称</label><input id="monitorModelName" type="text" placeholder="gpt-4o-mini / qwen-max"/></div>
                 <div class="form-group"><label style="color:rgba(255,255,255,0.72);font-size:12px;">可选CLI命令</label><input id="monitorCliCommand" type="text" placeholder="留空=默认API调用"/></div>
             </div>
+            <div class="mn-row" style="margin-top:6px;border-top:1px solid rgba(255,255,255,0.1);padding-top:8px;">
+                <div class="form-group" style="flex:0 0 auto;align-items:center;">
+                    <label style="color:rgba(255,255,255,0.72);font-size:12px;display:flex;align-items:center;gap:6px;cursor:pointer;">
+                        <input type="checkbox" id="monitorAiGod" style="width:16px;height:16px;accent-color:#ff6b6b;"/>
+                        <span>🤖 AI 法官</span>
+                    </label>
+                </div>
+                <div class="form-group"><label style="color:rgba(255,255,255,0.72);font-size:12px;">法官供应商</label><select id="monitorGodProvider"><option value="openai">OpenAI兼容</option><option value="claude">Claude</option></select></div>
+            </div>
+            <div id="monitorGodConfig" style="display:none;">
+                <div class="mn-row">
+                    <div class="form-group"><label style="color:#ff6b6b;font-size:12px;">法官 API URL</label><input id="monitorGodApiUrl" type="text" placeholder="法官模型API地址（留空=复用上方）"/></div>
+                    <div class="form-group"><label style="color:#ff6b6b;font-size:12px;">法官 API Key</label><input id="monitorGodApiKey" type="password" placeholder="法官模型Key（留空=复用上方）"/></div>
+                </div>
+                <div class="mn-row">
+                    <div class="form-group"><label style="color:#ff6b6b;font-size:12px;">法官模型名称</label><input id="monitorGodModelName" type="text" placeholder="留空=复用上方模型名称"/></div>
+                    <div class="form-group"><label style="color:#ff6b6b;font-size:12px;">法官温度</label><input id="monitorGodTemperature" type="number" min="0" max="2" step="0.1" value="0.7" style="width:80px;"/></div>
+                </div>
+                <div class="mn-info" style="font-size:11px;color:#ff6b6b;opacity:0.8;margin-top:2px;">⚡ AI法官会用LLM驱动游戏流程（旁白/裁决），留空则复用上方模型配置。</div>
+            </div>
             <div class="mn-actions">
                 <button class="mn-btn mn-btn-main" onclick="monitorCreateRoom()">🏠 按前端猫猫建房</button>
                 <button class="mn-btn mn-btn-main" onclick="monitorRegisterAgents()">🤖 同步前端猫猫到后端</button>
@@ -464,8 +519,6 @@
             <button class="ie-btn" onclick="importCatsClick()">📥 导入配置</button>
             <input type="file" id="importCatsFile" accept=".json" style="display:none;" onchange="importCatsFile(event)"/>
         </div>
-        <div class="members-title">成员列表</div>
-        <div class="members-list" id="membersList"></div>
         <div class="settings-section" style="padding:16px 20px;">
             <div class="settings-toggle" onclick="toggleCliProxy()">🖥️ <span>本地 CLI 代理</span><span class="cli-status" id="cliStatusDot"></span><span id="cliArrow" style="margin-left:auto;">▶</span></div>
             <div id="cliProxySettings" style="display:none;margin-top:12px;">
@@ -502,7 +555,10 @@
                     <span id="onlineCount">1 位铲屎官在线</span>
                 </div>
             </div>
-            <button class="judge-toggle" id="judgeToggle" style="display:none;" onclick="toggleJudgeView()">👁 法官视角</button>
+            <div style="display:flex;align-items:center;gap:6px;">
+                <button class="judge-toggle" id="judgeToggle" style="display:none;" onclick="toggleJudgeView()">👁 法官视角</button>
+                <button class="member-toggle active" id="memberToggle" onclick="toggleRightPanel()">👥 成员</button>
+            </div>
         </div>
         <div class="chat-messages" id="chatMessages">
             <div class="empty-state" id="emptyState"><div class="big-emoji">🐾</div><h3>欢迎来到喵星人聊天室！</h3><p>点击左侧「添加一只猫猫」，接入 AI 模型，让猫猫们加入聊天吧～</p></div>
@@ -514,6 +570,12 @@
                 <button class="send-btn" onclick="sendMessage()">🐾</button>
             </div>
         </div>
+    </div>
+
+    <!-- Right Member Panel -->
+    <div class="right-panel" id="rightPanel">
+        <div class="members-title">成员列表 · <span id="memberCount">0</span> 只猫猫</div>
+        <div class="members-list" id="membersList"></div>
     </div>
 </div>
 

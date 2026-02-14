@@ -30,7 +30,7 @@ class ActResponse(BaseModel):
 
 app = FastAPI(title="Cat Agent Template", version="0.1.0")
 
-MODEL_TYPE = os.getenv("MODEL_TYPE", "mock-cat")
+MODEL_TYPE = os.getenv("MODEL_TYPE", "cat-agent")
 DEFAULT_API_TIMEOUT_SEC = int(os.getenv("CAT_AGENT_API_TIMEOUT", "30"))
 
 
@@ -150,16 +150,23 @@ def _run_cli_action(req: ActRequest, cfg: Dict[str, Any]) -> Dict[str, Any]:
     }
 
 
-def _run_api_action(req: ActRequest, cfg: Dict[str, Any]) -> Dict[str, Any]:
-    api_url = str(cfg.get("api_url") or "").strip()
-    api_key = str(cfg.get("api_key") or "").strip()
-    model_name = str(cfg.get("model_name") or MODEL_TYPE).strip()
-    timeout_sec = int(cfg.get("api_timeout_sec") or DEFAULT_API_TIMEOUT_SEC)
+def _detect_provider(cfg: Dict[str, Any]) -> str:
+    """Detect the API provider from agent_config fields."""
+    provider = str(cfg.get("provider") or "").strip().lower()
+    if provider:
+        return provider
+    api_url = str(cfg.get("api_url") or "").strip().lower()
+    if "anthropic" in api_url:
+        return "claude"
+    if "siliconflow" in api_url:
+        return "siliconflow"
+    if "bigmodel.cn" in api_url:
+        return "glm"
+    return "openai"
 
-    if not api_url or not api_key:
-        raise RuntimeError("api_url/api_key 未传入")
 
-    prompt = (
+def _build_prompt(req: ActRequest) -> str:
+    return (
         "你是狼人杀子Agent。请只返回JSON，不要输出多余文本。"
         "格式: {\"action\": {\"type\": "
         "\"vote|kill|guard|save|check|shoot|speak\", "
@@ -170,6 +177,10 @@ def _run_api_action(req: ActRequest, cfg: Dict[str, Any]) -> Dict[str, Any]:
         f"visible_state={json.dumps(req.visible_state, ensure_ascii=False)}"
     )
 
+
+def _call_openai_compatible(api_url: str, api_key: str, model_name: str,
+                            prompt: str, timeout_sec: int) -> str:
+    """Call OpenAI-compatible API (OpenAI / GLM / SiliconFlow)."""
     headers = {
         "Authorization": f"Bearer {api_key}",
         "Content-Type": "application/json",
@@ -181,19 +192,63 @@ def _run_api_action(req: ActRequest, cfg: Dict[str, Any]) -> Dict[str, Any]:
             {"role": "user", "content": prompt},
         ],
         "temperature": 0.3,
+        "max_tokens": 800,
     }
-
     with httpx.Client(timeout=timeout_sec) as client:
         resp = client.post(api_url, headers=headers, json=body)
     resp.raise_for_status()
     data = resp.json()
+    choices = data.get("choices")
+    if isinstance(choices, list) and choices:
+        msg = choices[0].get("message") or {}
+        return str(msg.get("content") or "")
+    return ""
 
-    content = ""
-    if isinstance(data, dict):
-        choices = data.get("choices")
-        if isinstance(choices, list) and choices:
-            msg = choices[0].get("message") or {}
-            content = str(msg.get("content") or "")
+
+def _call_claude(api_url: str, api_key: str, model_name: str,
+                 prompt: str, timeout_sec: int) -> str:
+    """Call Anthropic Claude Messages API."""
+    headers = {
+        "x-api-key": api_key,
+        "anthropic-version": "2023-06-01",
+        "Content-Type": "application/json",
+    }
+    body = {
+        "model": model_name,
+        "max_tokens": 800,
+        "system": "你是狼人杀策略决策助手。",
+        "messages": [
+            {"role": "user", "content": prompt},
+        ],
+        "temperature": 0.3,
+    }
+    with httpx.Client(timeout=timeout_sec) as client:
+        resp = client.post(api_url, headers=headers, json=body)
+    resp.raise_for_status()
+    data = resp.json()
+    content_blocks = data.get("content")
+    if isinstance(content_blocks, list):
+        texts = [b.get("text", "") for b in content_blocks if b.get("type") == "text"]
+        return "\n".join(texts)
+    return ""
+
+
+def _run_api_action(req: ActRequest, cfg: Dict[str, Any]) -> Dict[str, Any]:
+    api_url = str(cfg.get("api_url") or "").strip()
+    api_key = str(cfg.get("api_key") or "").strip()
+    model_name = str(cfg.get("model_name") or MODEL_TYPE).strip()
+    timeout_sec = int(cfg.get("api_timeout_sec") or DEFAULT_API_TIMEOUT_SEC)
+
+    if not api_url or not api_key:
+        raise RuntimeError("api_url/api_key 未传入")
+
+    provider = _detect_provider(cfg)
+    prompt = _build_prompt(req)
+
+    if provider == "claude":
+        content = _call_claude(api_url, api_key, model_name, prompt, timeout_sec)
+    else:
+        content = _call_openai_compatible(api_url, api_key, model_name, prompt, timeout_sec)
 
     parsed = _parse_json_from_text(content)
     action = parsed.get("action")

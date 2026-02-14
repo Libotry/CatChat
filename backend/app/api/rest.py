@@ -50,6 +50,12 @@ def create_ai_room(req: CreateAIRoomRequest) -> dict:
             player_count=req.player_count,
             custom_role_config=req.custom_role_config,
             admin_override=req.admin_override,
+            ai_god=req.ai_god,
+            god_api_url=req.god_api_url,
+            god_api_key=req.god_api_key,
+            god_model_name=req.god_model_name,
+            god_provider=req.god_provider,
+            god_temperature=req.god_temperature,
         )
     except ValueError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc

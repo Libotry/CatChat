@@ -144,9 +144,11 @@ class AgentScheduler:
             "visible_state": visible_state,
             "prompt_template": prompt_template,
             "agent_config": {
+                "provider": agent.model_type,
                 "api_url": agent.api_url,
                 "api_key": agent.api_key,
                 "model_name": agent.model_name or agent.model_type,
+                "api_timeout_sec": max(agent.timeout_sec - 5, 10),
                 "cli_command": agent.cli_command,
                 "cli_timeout_sec": agent.cli_timeout_sec,
             },

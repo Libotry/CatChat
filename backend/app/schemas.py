@@ -63,6 +63,12 @@ class CreateAIRoomRequest(BaseModel):
     player_count: int = Field(default=12, ge=8, le=12)
     custom_role_config: Optional[Dict[str, Any]] = None
     admin_override: bool = False
+    ai_god: bool = False
+    god_api_url: Optional[str] = None
+    god_api_key: Optional[str] = None
+    god_model_name: Optional[str] = None
+    god_provider: Optional[str] = None
+    god_temperature: Optional[float] = None
 
 
 class RegisterAgentRequest(BaseModel):

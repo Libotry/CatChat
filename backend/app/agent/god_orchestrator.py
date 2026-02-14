@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import asyncio
 from dataclasses import dataclass
 from typing import Optional
 
@@ -220,7 +221,8 @@ class GodOrchestrator:
 
     async def _run_day_discuss(self, engine: GameEngine) -> None:
         alive_players = [p for p in engine.snapshot.players.values() if p.alive]
-        for player in alive_players:
+
+        async def _discuss(player):
             visible = self.perspective.build_visible_state(engine, player.player_id)
             result = await self.scheduler.trigger_agent_action(
                 player_id=player.player_id,
@@ -231,6 +233,10 @@ class GodOrchestrator:
                 prompt_template=self.templates.day_discuss,
                 strategy_name="day_discuss",
             )
+            return player, result
+
+        results = await asyncio.gather(*[_discuss(p) for p in alive_players])
+        for player, result in results:
             engine._audit(
                 "agent_speech",
                 player.player_id,
@@ -245,7 +251,8 @@ class GodOrchestrator:
 
     async def _run_day_vote(self, engine: GameEngine) -> None:
         alive_players = [p for p in engine.snapshot.players.values() if p.alive]
-        for player in alive_players:
+
+        async def _vote(player):
             visible = self.perspective.build_visible_state(engine, player.player_id)
             result = await self.scheduler.trigger_agent_action(
                 player_id=player.player_id,
@@ -256,6 +263,10 @@ class GodOrchestrator:
                 prompt_template=self.templates.day_vote,
                 strategy_name="day_vote",
             )
+            return player, result
+
+        results = await asyncio.gather(*[_vote(p) for p in alive_players])
+        for player, result in results:
             target = self._normalize_target(engine, result.get("action", {}).get("target"), allow_self=False)
             try:
                 engine.submit_vote(player.player_id, target)
