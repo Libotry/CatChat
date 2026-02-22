@@ -107,10 +107,18 @@ class SeerSkill(SkillStrategy):
         actor = snapshot.players[actor_id]
         if actor.role != Role.SEER:
             raise ValueError("only seer can do this action")
+        if actor.last_seer_target and actor.last_seer_target == target_id:
+            has_alternative = any(
+                p.alive and p.player_id not in {actor_id, target_id}
+                for p in snapshot.players.values()
+            )
+            if has_alternative:
+                raise ValueError("seer cannot verify same target in consecutive nights")
 
     def apply(self, snapshot: GameSnapshot, actor_id: str, target_id: Optional[str], extra: Optional[dict] = None) -> None:
         self.validate(snapshot, actor_id, target_id)
         snapshot.round_context.night_actions.seer_target = target_id
+        snapshot.players[actor_id].last_seer_target = target_id
 
 
 def resolve_wolf_target(votes: Dict[str, str], alive_player_ids: list[str]) -> Optional[str]:

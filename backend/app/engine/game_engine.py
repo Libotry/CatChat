@@ -232,11 +232,19 @@ class GameEngine:
         candidates = [
             p.player_id
             for p in self.snapshot.players.values()
-            if p.alive and p.player_id != seer.player_id
+            if p.alive and p.player_id != seer.player_id and p.player_id != seer.last_seer_target
         ]
         if not candidates:
+            candidates = [
+                p.player_id
+                for p in self.snapshot.players.values()
+                if p.alive and p.player_id != seer.player_id
+            ]
+        if not candidates:
             return
-        self.snapshot.round_context.night_actions.seer_target = random.choice(candidates)
+        target_id = random.choice(candidates)
+        self.snapshot.round_context.night_actions.seer_target = target_id
+        seer.last_seer_target = target_id
         self._audit("auto_action", seer.player_id, {"phase": "night_seer"})
 
     def _autorun_day_vote_phase(self) -> None:
@@ -366,9 +374,11 @@ class GameEngine:
         }
 
         counter: Dict[str, int] = {}
+        submitted_count = 0
         for voter_id, target_id in votes.items():
             if voter_id not in alive_voters:
                 continue
+            submitted_count += 1
             if not target_id:
                 continue
             target = self.snapshot.players.get(target_id)
@@ -376,8 +386,16 @@ class GameEngine:
                 continue
             counter[target_id] = counter.get(target_id, 0) + 1
 
+        abstain_or_missing = max(0, len(alive_voters) - submitted_count)
+
         if not counter:
             self.snapshot.round_context.deaths_this_round = {}
+            self._audit("vote_result", "system", {"result": "no_valid_vote"})
+            self._emit_day_vote_summary(
+                result="no_valid_vote",
+                counter=counter,
+                abstain_or_missing=abstain_or_missing,
+            )
             return
 
         max_votes = max(counter.values())
@@ -386,6 +404,12 @@ class GameEngine:
         if len(tied) > 1 and self.config.rules.vote_tie_exile_none:
             self.snapshot.round_context.deaths_this_round = {}
             self._audit("vote_result", "system", {"result": "tie_no_exile", "tied": tied})
+            self._emit_day_vote_summary(
+                result="tie_no_exile",
+                counter=counter,
+                tied=tied,
+                abstain_or_missing=abstain_or_missing,
+            )
             return
 
         exile_target = random.choice(tied)
@@ -404,12 +428,78 @@ class GameEngine:
                 exiled_player.player_id,
                 {"result": "immune", "lost_vote_right": True},
             )
+            self._emit_day_vote_summary(
+                result="fool_reveal_immune",
+                counter=counter,
+                exile_target=exile_target,
+                abstain_or_missing=abstain_or_missing,
+            )
             return
 
         self._kill_player(exile_target, DeathCause.VOTE)
         self.snapshot.round_context.deaths_this_round = {exile_target: DeathCause.VOTE}
         self._audit("vote_result", "system", {"result": "exile", "target": exile_target})
+        self._emit_day_vote_summary(
+            result="exile",
+            counter=counter,
+            exile_target=exile_target,
+            abstain_or_missing=abstain_or_missing,
+        )
         self._check_hunter_trigger(self.snapshot.round_context.deaths_this_round)
+
+    def _emit_day_vote_summary(
+        self,
+        *,
+        result: str,
+        counter: Dict[str, int],
+        exile_target: Optional[str] = None,
+        tied: Optional[List[str]] = None,
+        abstain_or_missing: int = 0,
+    ) -> None:
+        lines: List[str] = ["法官：白天投票结果如下。"]
+
+        if counter:
+            items = sorted(counter.items(), key=lambda item: (-item[1], item[0]))
+            detail = "、".join(
+                f"{self.snapshot.players[pid].nickname or pid}({count}票)"
+                for pid, count in items
+                if pid in self.snapshot.players
+            )
+            if detail:
+                lines.append("票型统计：" + detail + "。")
+
+        if abstain_or_missing > 0:
+            lines.append(f"未形成有效投票：{abstain_or_missing} 人。")
+
+        if result == "exile" and exile_target:
+            target_name = self.snapshot.players[exile_target].nickname or exile_target
+            lines.append(f"最终放逐：{target_name}。")
+        elif result == "tie_no_exile":
+            tied_names = []
+            for pid in tied or []:
+                player = self.snapshot.players.get(pid)
+                tied_names.append((player.nickname if player else None) or pid)
+            if tied_names:
+                lines.append("出现平票（" + "、".join(tied_names) + "），本轮无人出局。")
+            else:
+                lines.append("出现平票，本轮无人出局。")
+        elif result == "fool_reveal_immune" and exile_target:
+            target_name = self.snapshot.players[exile_target].nickname or exile_target
+            lines.append(f"{target_name} 身份为白痴，翻牌免死，本轮无人出局。")
+        elif result == "no_valid_vote":
+            lines.append("本轮未形成有效票型，无人出局。")
+
+        self._audit(
+            "agent_speech",
+            "god",
+            {
+                "phase": Phase.DAY_VOTE.value,
+                "role": "judge",
+                "content": " ".join(lines),
+                "is_fallback": False,
+                "fallback_reason": None,
+            },
+        )
 
     def _check_hunter_trigger(self, deaths: Dict[str, DeathCause]) -> None:
         for player_id, cause in deaths.items():
@@ -511,19 +601,109 @@ class GameEngine:
         return player
 
     def public_state(self) -> dict:
-        speech_history = [
-            {
-                "player_id": row.get("actor_id"),
-                "phase": row.get("payload", {}).get("phase"),
-                "role": row.get("payload", {}).get("role"),
-                "content": row.get("payload", {}).get("content", ""),
-                "is_fallback": row.get("payload", {}).get("is_fallback", False),
-                "fallback_reason": row.get("payload", {}).get("fallback_reason"),
-                "timestamp": row.get("ts"),
-            }
-            for row in self.snapshot.action_audit_log
-            if row.get("event_type") == "agent_speech"
-        ]
+        speech_history = []
+        death_cause_by_player: Dict[str, str] = {}
+        for row in self.snapshot.action_audit_log:
+            event_type = row.get("event_type")
+            payload = row.get("payload", {}) or {}
+
+            if event_type == "death":
+                dead_player_id = payload.get("player_id")
+                cause = payload.get("cause")
+                if isinstance(dead_player_id, str) and dead_player_id and isinstance(cause, str) and cause:
+                    death_cause_by_player[dead_player_id] = cause
+                continue
+
+            if event_type == "agent_speech":
+                speech_history.append(
+                    {
+                        "player_id": row.get("actor_id"),
+                        "phase": payload.get("phase"),
+                        "role": payload.get("role"),
+                        "content": payload.get("content", ""),
+                        "thought_content": payload.get("thought_content", ""),
+                        "is_fallback": payload.get("is_fallback", False),
+                        "fallback_reason": payload.get("fallback_reason"),
+                        "timestamp": row.get("ts"),
+                        "event": "agent_speech",
+                    }
+                )
+                continue
+
+            if event_type == "god_narration":
+                speech_history.append(
+                    {
+                        "player_id": "god",
+                        "phase": payload.get("phase") or self.snapshot.phase.value,
+                        "role": "judge",
+                        "content": payload.get("content", ""),
+                        "is_fallback": payload.get("is_fallback", False),
+                        "fallback_reason": payload.get("fallback_reason"),
+                        "timestamp": row.get("ts"),
+                        "event": "god_narration",
+                    }
+                )
+                continue
+
+            if event_type == "vote_result":
+                result = str(payload.get("result") or "")
+                if result == "exile":
+                    target_id = payload.get("target")
+                    target_name = (
+                        (self.snapshot.players[target_id].nickname or target_id)
+                        if isinstance(target_id, str) and target_id in self.snapshot.players
+                        else "未知"
+                    )
+                    content = f"投票结果：{target_name} 被放逐。"
+                elif result == "tie_no_exile":
+                    tied = payload.get("tied") or []
+                    tied_names = [
+                        (self.snapshot.players[pid].nickname or pid)
+                        for pid in tied
+                        if isinstance(pid, str) and pid in self.snapshot.players
+                    ]
+                    if tied_names:
+                        content = "投票结果：平票（" + "、".join(tied_names) + "），无人出局。"
+                    else:
+                        content = "投票结果：平票，无人出局。"
+                elif result == "no_valid_vote":
+                    content = "投票结果：未形成有效票型，无人出局。"
+                else:
+                    content = "投票结果已结算。"
+
+                speech_history.append(
+                    {
+                        "player_id": "god",
+                        "phase": Phase.DAY_VOTE.value,
+                        "role": "judge",
+                        "content": content,
+                        "is_fallback": False,
+                        "fallback_reason": None,
+                        "timestamp": row.get("ts"),
+                        "event": "vote_result",
+                    }
+                )
+                continue
+
+            if event_type == "fool_reveal":
+                player_id = row.get("actor_id")
+                player_name = (
+                    (self.snapshot.players[player_id].nickname or player_id)
+                    if isinstance(player_id, str) and player_id in self.snapshot.players
+                    else "该玩家"
+                )
+                speech_history.append(
+                    {
+                        "player_id": "god",
+                        "phase": Phase.DAY_VOTE.value,
+                        "role": "judge",
+                        "content": f"投票结果：{player_name} 为白痴并翻牌免死，本轮无人出局。",
+                        "is_fallback": False,
+                        "fallback_reason": None,
+                        "timestamp": row.get("ts"),
+                        "event": "fool_reveal",
+                    }
+                )
 
         return {
             "room_id": self.snapshot.room_id,
@@ -541,6 +721,7 @@ class GameEngine:
                     "nickname": p.nickname,
                     "role": p.role.value if p.role else None,
                     "alive": p.alive,
+                    "death_cause": death_cause_by_player.get(p.player_id),
                     "online": p.online,
                     "can_vote": p.can_vote,
                     "fool_revealed": p.fool_revealed,
@@ -551,7 +732,7 @@ class GameEngine:
                 pid: cause.value
                 for pid, cause in self.snapshot.round_context.deaths_this_round.items()
             },
-            "speech_history": speech_history[-20:],
+            "speech_history": speech_history[-30:],
             "is_peace_night": self.snapshot.phase in {Phase.DAY_ANNOUNCE, Phase.DAY_DISCUSS, Phase.DAY_VOTE}
             and not self.snapshot.round_context.deaths_this_round,
         }

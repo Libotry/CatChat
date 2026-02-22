@@ -85,6 +85,7 @@
         .role-badge.witch { background: #2980b9; color: white; }
         .role-badge.hunter { background: #d35400; color: white; }
         .role-badge.guard { background: #16a085; color: white; }
+        .wf-msg.role-hidden .sender-role-badge { display: none; }
 
         .add-cat-btn { margin: 16px 20px; padding: 14px; background: linear-gradient(135deg, var(--accent-pink), var(--accent-orange)); color: white; border: none; border-radius: var(--radius-sm); font-size: 15px; font-weight: 600; cursor: pointer; transition: all 0.3s ease; display: flex; align-items: center; justify-content: center; gap: 8px; box-shadow: 0 4px 12px rgba(245,130,174,0.3); }
         .add-cat-btn:hover { transform: translateY(-2px); box-shadow: 0 6px 20px rgba(245,130,174,0.4); }
@@ -114,6 +115,7 @@
         .member-name { font-size: 14px; font-weight: 600; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
         .member-role { font-size: 12px; color: var(--text-secondary); margin-top: 2px; display: flex; align-items: center; gap: 4px; flex-wrap: wrap; }
         .member-status { width: 10px; height: 10px; border-radius: 50%; background: var(--accent-green); border: 2px solid var(--bg-secondary); position: absolute; left: 44px; top: 42px; }
+        .member-status.offline { background: #9ca3af; }
         .member-remove { opacity: 0; background: none; border: none; color: #e74c3c; cursor: pointer; font-size: 18px; padding: 4px 8px; border-radius: 8px; transition: all 0.2s; }
         .member-card:hover .member-remove { opacity: 1; }
         .member-remove:hover { background: rgba(231,76,60,0.1); }
@@ -160,6 +162,7 @@
         .system-message.night-msg { background: linear-gradient(135deg,#1a1a2e,#16213e); color: #f0e68c; border: 1px solid #2c3e50; }
         .system-message.day-msg { background: linear-gradient(135deg,#f39c12,#e67e22); color: white; }
         .system-message.vote-msg { background: linear-gradient(135deg,#e74c3c,#c0392b); color: white; }
+        .system-message.judge-settle-msg { background: linear-gradient(135deg,#f59e0b,#f97316); color: #1f2937; border: 1px solid rgba(31,41,55,0.25); font-weight: 700; }
 
         /* Input */
         .chat-input-area { position: relative; padding: 16px 24px; background: var(--bg-chat); border-top: 1px solid rgba(0,0,0,0.06); }
@@ -417,23 +420,23 @@
                     <span>🤖 AI 法官</span>
                     <span style="font-size:11px;color:rgba(255,255,255,0.5);">（由LLM驱动法官旁白与裁决）</span>
                 </label>
+                <label style="display:flex;align-items:center;gap:8px;cursor:pointer;color:white;font-size:13px;margin-top:8px;">
+                    <input type="checkbox" id="wpHideNightRole" onchange="wpToggleNightRoleMask()" style="width:16px;height:16px;accent-color:#ffd803;" checked/>
+                    <span>🎭 夜晚观众隐藏身份标签</span>
+                    <span style="font-size:11px;color:rgba(255,255,255,0.5);">（法官视角仍可见）</span>
+                </label>
                 <div id="wpAiGodConfig" style="display:none;margin-top:8px;">
-                    <div style="display:flex;gap:8px;flex-wrap:wrap;">
-                        <div class="form-group" style="flex:1;min-width:140px;"><label style="color:#ff6b6b;font-size:11px;">法官供应商</label><select id="wpGodProvider" onchange="wpSyncGodConfig()" style="font-size:12px;padding:4px 6px;"><option value="openai">OpenAI兼容</option><option value="claude">Claude</option></select></div>
-                        <div class="form-group" style="flex:2;min-width:180px;"><label style="color:#ff6b6b;font-size:11px;">法官 API URL</label><input id="wpGodApiUrl" type="text" placeholder="留空=复用观测台配置" onchange="wpSyncGodConfig()" style="font-size:12px;padding:4px 6px;"/></div>
+                    <div class="form-group" style="margin-bottom:0;">
+                        <label style="color:#ff6b6b;font-size:11px;">选择法官猫猫</label>
+                        <select id="wpGodCatId" onchange="monitorOnGodCatChange('wp')" style="font-size:12px;padding:4px 6px;"></select>
                     </div>
-                    <div style="display:flex;gap:8px;flex-wrap:wrap;margin-top:4px;">
-                        <div class="form-group" style="flex:2;min-width:180px;"><label style="color:#ff6b6b;font-size:11px;">法官 API Key</label><input id="wpGodApiKey" type="password" placeholder="留空=复用观测台配置" onchange="wpSyncGodConfig()" style="font-size:12px;padding:4px 6px;"/></div>
-                        <div class="form-group" style="flex:1;min-width:140px;"><label style="color:#ff6b6b;font-size:11px;">法官模型名称</label><input id="wpGodModelName" type="text" placeholder="留空=复用观测台" onchange="wpSyncGodConfig()" style="font-size:12px;padding:4px 6px;"/></div>
-                    </div>
-                    <div style="font-size:11px;color:#ff6b6b;opacity:0.7;margin-top:4px;">⚡ 启用后法官由AI生成旁白和裁决，留空字段会复用联动观测台的模型配置。</div>
+                    <div style="font-size:11px;color:#ff6b6b;opacity:0.7;margin-top:4px;">⚡ AI法官将直接复用所选猫猫的模型配置（API/Key/模型）。</div>
                 </div>
             </div>
             <div class="wp-actions">
                 <button class="wp-btn wp-btn-start" id="wpStartBtn" onclick="werewolfStart()">🎮 开始游戏</button>
                 <button class="wp-btn wp-btn-next" id="wpNextBtn" onclick="werewolfNextPhase()" disabled>⏭ 下一阶段</button>
                 <button class="wp-btn wp-btn-reveal" id="wpRevealBtn" onclick="werewolfRevealAll()" disabled>👁 公开角色</button>
-                <button class="wp-btn wp-btn-reveal" id="wpLinkBtn" onclick="werewolfToggleBackendLink()">🔗 联动后端</button>
                 <button class="wp-btn wp-btn-end" id="wpEndBtn" onclick="werewolfEnd()" disabled>⏹ 结束游戏</button>
             </div>
             <div class="wp-status" id="wpStatus" style="display:none;"></div>
@@ -453,7 +456,7 @@
         </div>
         <div class="monitor-panel" id="monitorPanel">
             <div class="mn-title">🛰️ 联动观测台</div>
-            <div class="mn-info">与狼人杀联动使用同一条后端流程：按前端猫猫配置建房/注册，并实时查看阶段、状态与发言。</div>
+            <div class="mn-info">与狼人杀联动使用后端统一编排：由后端读取环境变量完成建房/拉起/注册，前端仅触发流程并观察结果。</div>
             <div class="mn-row">
                 <div class="form-group"><label style="color:rgba(255,255,255,0.72);font-size:12px;">后端地址</label><input id="monitorApiBase" type="text" placeholder="http://127.0.0.1:8000"/></div>
                 <div class="form-group"><label style="color:rgba(255,255,255,0.72);font-size:12px;">猫猫数量（自动）</label><select id="monitorPlayerCount"><option value="8">8</option><option value="9">9</option><option value="10">10</option><option value="11" selected>11</option><option value="12">12</option></select></div>
@@ -481,23 +484,27 @@
                         <span>🤖 AI 法官</span>
                     </label>
                 </div>
-                <div class="form-group"><label style="color:rgba(255,255,255,0.72);font-size:12px;">法官供应商</label><select id="monitorGodProvider"><option value="openai">OpenAI兼容</option><option value="claude">Claude</option></select></div>
+                <div class="form-group" style="flex:0 0 auto;align-items:center;">
+                    <label style="color:rgba(255,255,255,0.72);font-size:12px;display:flex;align-items:center;gap:6px;cursor:pointer;">
+                        <input type="checkbox" id="monitorShowThought" onchange="monitorToggleThoughtVisibility()" style="width:16px;height:16px;accent-color:#22c55e;" checked/>
+                        <span>🧠 监控显示思考内容</span>
+                    </label>
+                </div>
             </div>
             <div id="monitorGodConfig" style="display:none;">
                 <div class="mn-row">
-                    <div class="form-group"><label style="color:#ff6b6b;font-size:12px;">法官 API URL</label><input id="monitorGodApiUrl" type="text" placeholder="法官模型API地址（留空=复用上方）"/></div>
-                    <div class="form-group"><label style="color:#ff6b6b;font-size:12px;">法官 API Key</label><input id="monitorGodApiKey" type="password" placeholder="法官模型Key（留空=复用上方）"/></div>
+                    <div class="form-group"><label style="color:#ff6b6b;font-size:12px;">选择法官猫猫</label><select id="monitorGodCatId" onchange="monitorOnGodCatChange('monitor')"></select></div>
                 </div>
-                <div class="mn-row">
-                    <div class="form-group"><label style="color:#ff6b6b;font-size:12px;">法官模型名称</label><input id="monitorGodModelName" type="text" placeholder="留空=复用上方模型名称"/></div>
-                    <div class="form-group"><label style="color:#ff6b6b;font-size:12px;">法官温度</label><input id="monitorGodTemperature" type="number" min="0" max="2" step="0.1" value="0.7" style="width:80px;"/></div>
-                </div>
-                <div class="mn-info" style="font-size:11px;color:#ff6b6b;opacity:0.8;margin-top:2px;">⚡ AI法官会用LLM驱动游戏流程（旁白/裁决），留空则复用上方模型配置。</div>
+                <div class="mn-info" style="font-size:11px;color:#ff6b6b;opacity:0.8;margin-top:2px;">⚡ AI法官会复用所选猫猫配置驱动旁白与裁决，无需额外填写。</div>
             </div>
             <div class="mn-actions">
-                <button class="mn-btn mn-btn-main" onclick="monitorCreateRoom()">🏠 按前端猫猫建房</button>
-                <button class="mn-btn mn-btn-main" onclick="monitorRegisterAgents()">🤖 同步前端猫猫到后端</button>
+                <button class="mn-btn mn-btn-main" onclick="monitorCreateRoom()">🏠 后端编排启动</button>
+                <button class="mn-btn mn-btn-main" onclick="monitorRegisterAgents()">🤖 后端重建并拉起</button>
                 <button class="mn-btn mn-btn-main" onclick="monitorConnectWs()">🔌 连接WS</button>
+                <button class="mn-btn mn-btn-sub" onclick="monitorSaveEnvProfile()">💾 保存到环境变量</button>
+                <button class="mn-btn mn-btn-sub" id="monitorForceApplyBtn" onclick="monitorForceApplyEnvProfile()">🚀 强制同步并应用</button>
+                <button class="mn-btn mn-btn-sub" onclick="monitorReloadEnvProfile()">📥 从环境变量重载</button>
+                <span id="envSaveStatus" style="font-size:11px;color:rgba(255,255,255,0.5);align-self:center;margin-left:4px;"></span>
                 <button class="mn-btn mn-btn-sub" onclick="monitorStartGame()">▶️ 开始游戏</button>
                 <button class="mn-btn mn-btn-sub" onclick="monitorAdvance()">⏭️ 推进阶段</button>
                 <button class="mn-btn mn-btn-sub" onclick="monitorLoadConfig()">📦 配置快照</button>
@@ -541,6 +548,23 @@
                 <div class="form-group" style="margin-bottom:10px;"><label>默认 Provider</label><select id="globalProvider"><option value="openai">OpenAI 兼容</option><option value="claude">Claude</option><option value="glm">GLM 智谱</option><option value="siliconflow">硅基流动</option></select></div>
                 <div class="form-group" style="margin-bottom:10px;"><label>默认 API Key</label><input type="password" id="globalApiKey" placeholder="填入你的 API Key"/></div>
                 <div class="form-group" style="margin-bottom:0;"><label>默认模型</label><input type="text" id="globalModel" placeholder="gpt-4o-mini / claude-sonnet-4-20250514 / glm-4-flash"/></div>
+            </div>
+        </div>
+        <div class="settings-section" style="padding:16px 20px;">
+            <div class="settings-toggle" onclick="toggleTtsSettings()">🔊 <span>语音播报设置</span><span id="ttsArrow" style="margin-left:auto;">▶</span></div>
+            <div id="ttsSettings" style="display:none;margin-top:12px;">
+                <div style="display:flex;align-items:center;gap:10px;margin-bottom:10px;">
+                    <label class="cli-switch"><input type="checkbox" id="ttsEnabled" onchange="onTtsEnabledToggle()"><span class="cli-slider"></span></label>
+                    <span style="font-size:13px;font-weight:600;" id="ttsEnabledLabel">已启用</span>
+                </div>
+                <div class="form-group" style="margin-bottom:10px;">
+                    <label>语速 <span id="ttsRateValue" style="color:var(--text-secondary);margin-left:6px;">1.00x</span></label>
+                    <input type="range" id="ttsRate" min="0.6" max="1.6" step="0.05" value="1" oninput="onTtsRateInput()"/>
+                </div>
+                <div class="form-group" style="margin-bottom:0;">
+                    <label>音量 <span id="ttsVolumeValue" style="color:var(--text-secondary);margin-left:6px;">100%</span></label>
+                    <input type="range" id="ttsVolume" min="0" max="1" step="0.05" value="1" oninput="onTtsVolumeInput()"/>
+                </div>
             </div>
         </div>
     </div>

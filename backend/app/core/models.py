@@ -57,6 +57,7 @@ class PlayerState:
     can_vote: bool = True
     fool_revealed: bool = False
     last_guard_target: Optional[str] = None
+    last_seer_target: Optional[str] = None
     used_antidote: bool = False
     used_poison: bool = False
 

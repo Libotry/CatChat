@@ -3,6 +3,8 @@ from __future__ import annotations
 from fastapi import APIRouter, HTTPException
 
 from app.api.deps import room_manager
+from app.config.frontend_profile_env import load_frontend_profile, save_frontend_profile
+from app.websocket.handler import ws_manager
 from app.schemas import (
     ActionRequest,
     AIHealthResponse,
@@ -12,6 +14,8 @@ from app.schemas import (
     BootstrapAgentsRequest,
     CreateAIRoomRequest,
     CreateRoomRequest,
+    FrontendProfileRequest,
+    FrontendProfileResponse,
     GenericMessage,
     HotSwapAgentRequest,
     JoinRoomRequest,
@@ -27,6 +31,40 @@ from app.schemas import (
 )
 
 router = APIRouter(prefix="/api", tags=["werewolf"])
+
+
+@router.get("/frontend/profile", response_model=FrontendProfileResponse)
+def get_frontend_profile() -> FrontendProfileResponse:
+    data = load_frontend_profile()
+    return FrontendProfileResponse(**data)
+
+
+@router.post("/frontend/profile", response_model=dict)
+def save_frontend_profile_api(req: FrontendProfileRequest) -> dict:
+    if not isinstance(req.cats, list):
+        raise HTTPException(status_code=400, detail="cats must be an array")
+    if len(req.cats) > 200:
+        raise HTTPException(status_code=400, detail="cats too many")
+    return save_frontend_profile(cats=req.cats, monitor_config=req.monitor_config)
+
+
+@router.post("/frontend/profile/apply", response_model=dict)
+def save_and_apply_frontend_profile_api(req: FrontendProfileRequest) -> dict:
+    if not isinstance(req.cats, list):
+        raise HTTPException(status_code=400, detail="cats must be an array")
+    if len(req.cats) > 200:
+        raise HTTPException(status_code=400, detail="cats too many")
+
+    saved = save_frontend_profile(cats=req.cats, monitor_config=req.monitor_config)
+    try:
+        applied = room_manager.bootstrap_from_frontend_env()
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+    return {
+        "saved": saved,
+        "applied": applied,
+    }
 
 
 @router.post("/rooms", response_model=dict)
@@ -57,6 +95,14 @@ def create_ai_room(req: CreateAIRoomRequest) -> dict:
             god_provider=req.god_provider,
             god_temperature=req.god_temperature,
         )
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+
+@router.post("/ai/bootstrap-from-env", response_model=dict)
+def bootstrap_from_env() -> dict:
+    try:
+        return room_manager.bootstrap_from_frontend_env()
     except ValueError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
 
@@ -262,7 +308,13 @@ def advance(room_id: str) -> RoomStateResponse:
 @router.post("/ai/rooms/{room_id}/run-phase", response_model=AIPhaseRunResponse)
 async def ai_run_phase(room_id: str) -> AIPhaseRunResponse:
     try:
-        result = await room_manager.ai_run_single_phase(room_id)
+        async def _push_incremental_state(state: dict) -> None:
+            await ws_manager.broadcast_room_state(room_id, state)
+
+        result = await room_manager.ai_run_single_phase(
+            room_id,
+            progress_callback=_push_incremental_state,
+        )
         return AIPhaseRunResponse(**result)
     except ValueError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc

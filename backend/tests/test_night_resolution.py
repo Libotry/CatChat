@@ -98,3 +98,34 @@ def test_witch_poison_ignores_guard() -> None:
     assert engine.snapshot.players["p9"].alive is True  # guarded
     assert engine.snapshot.players["p10"].alive is False  # poisoned
     assert deaths["p10"] == DeathCause.POISON
+
+
+def test_seer_cannot_check_same_target_in_consecutive_nights() -> None:
+    engine, _ = _make_started_game()
+
+    # Round 1 -> NIGHT_SEER
+    engine.advance_phase()  # NIGHT_GUARD
+    engine.advance_phase()  # NIGHT_WITCH
+    engine.advance_phase()  # NIGHT_SEER
+    assert engine.snapshot.phase == Phase.NIGHT_SEER
+
+    engine.submit_night_action("p7", "p9")
+    engine.advance_phase()  # DAY_ANNOUNCE
+    engine.advance_phase()  # DAY_DISCUSS
+    engine.advance_phase()  # DAY_VOTE
+    engine.timeout_autorun_current_phase()  # resolve vote and next round NIGHT_WOLF
+
+    # Round 2 -> NIGHT_SEER
+    engine.advance_phase()  # NIGHT_GUARD
+    engine.advance_phase()  # NIGHT_WITCH
+    engine.advance_phase()  # NIGHT_SEER
+    assert engine.snapshot.phase == Phase.NIGHT_SEER
+
+    try:
+        engine.submit_night_action("p7", "p9")
+        raised = False
+    except ValueError as exc:
+        raised = True
+        assert "consecutive" in str(exc)
+
+    assert raised is True

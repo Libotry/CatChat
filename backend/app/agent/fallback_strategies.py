@@ -37,15 +37,73 @@ class FallbackStrategies:
 
     def get_action(self, strategy_name: str, context: dict) -> dict:
         if strategy_name in self._templates:
-            return self._render_template(self._templates[strategy_name], context)
+            return self._render_template(strategy_name, self._templates[strategy_name], context)
         fn = self._strategies.get(strategy_name, self._strategies["default"])
         return fn(context)
 
-    def _render_template(self, template: dict, context: dict) -> dict:
+    def _render_template(self, strategy_name: str, template: dict, context: dict) -> dict:
         result = dict(template)
         alive = context.get("alive_players", [])
         if result.get("action", {}).get("target") == "__RANDOM_ALIVE__" and alive:
             result["action"]["target"] = random.choice(alive)
+        if strategy_name == "day_vote":
+            action = result.get("action") or {}
+            target = action.get("target") if isinstance(action, dict) else None
+            reasoning = str(result.get("reasoning") or "").strip()
+            speech = str(result.get("speech") or "").strip()
+            thinking = str(result.get("thinking") or "").strip()
+            if target:
+                if not reasoning or (target not in reasoning and "投票给" not in reasoning):
+                    result["reasoning"] = f"信息有限，我投票给 {target}。"
+                if not speech:
+                    result["speech"] = f"当前信息有限，我投票给 {target}。"
+            else:
+                if not reasoning or ("弃票" not in reasoning and "不投票" not in reasoning):
+                    result["reasoning"] = "当前没有可投目标，我选择弃票。"
+                if not speech:
+                    result["speech"] = "当前没有可投目标，我选择弃票。"
+            if not thinking:
+                result["thinking"] = str(result.get("reasoning") or "")
+        if strategy_name == "night_seer":
+            action = result.get("action") or {}
+            target = action.get("target") if isinstance(action, dict) else None
+            reasoning = str(result.get("reasoning") or "").strip()
+            if target:
+                if not reasoning or (target not in reasoning and "查验" not in reasoning):
+                    result["reasoning"] = f"第一夜信息有限，我查验了 {target} 以获取身份线索。"
+            else:
+                if not reasoning or ("未查验" not in reasoning and "没查验" not in reasoning):
+                    result["reasoning"] = "当前没有可查验目标，我本轮未完成查验。"
+        if strategy_name == "night_wolf":
+            action = result.get("action") or {}
+            target = action.get("target") if isinstance(action, dict) else None
+            reasoning = str(result.get("reasoning") or "").strip()
+            if target:
+                if not reasoning or (target not in reasoning and "击杀" not in reasoning and "目标" not in reasoning):
+                    result["reasoning"] = f"我建议今晚击杀 {target}。"
+            else:
+                if not reasoning or ("暂无目标" not in reasoning and "未确定目标" not in reasoning):
+                    result["reasoning"] = "当前信息不足，我暂未确定今晚目标。"
+        if strategy_name == "night_guard":
+            action = result.get("action") or {}
+            target = action.get("target") if isinstance(action, dict) else None
+            reasoning = str(result.get("reasoning") or "").strip()
+            if target:
+                if not reasoning or (target not in reasoning and "守护" not in reasoning):
+                    result["reasoning"] = f"我决定守护 {target}。"
+            else:
+                if not reasoning or ("未守护" not in reasoning and "不守护" not in reasoning):
+                    result["reasoning"] = "当前没有可守护目标，我本轮未守护。"
+        if strategy_name == "hunter_shot":
+            action = result.get("action") or {}
+            target = action.get("target") if isinstance(action, dict) else None
+            reasoning = str(result.get("reasoning") or "").strip()
+            if target:
+                if not reasoning or (target not in reasoning and "带走" not in reasoning and "开枪" not in reasoning):
+                    result["reasoning"] = f"我决定开枪带走 {target}。"
+            else:
+                if not reasoning or ("不开枪" not in reasoning and "未开枪" not in reasoning):
+                    result["reasoning"] = "当前没有合适目标，我本轮不开枪。"
         return result
 
     @staticmethod
@@ -61,9 +119,13 @@ class FallbackStrategies:
         wolf_team = context.get("wolf_team_ids") or context.get("wolf_team", [])
         non_wolf = [pid for pid in alive if pid not in wolf_team]
         target = random.choice(non_wolf) if non_wolf else None
+        if target:
+            reasoning = f"我建议今晚击杀 {target}。"
+        else:
+            reasoning = "当前信息不足，我暂未确定今晚目标。"
         return {
             "action": {"type": "kill", "target": target},
-            "reasoning": "fallback/wolf_random",
+            "reasoning": reasoning,
         }
 
     @staticmethod
@@ -72,9 +134,13 @@ class FallbackStrategies:
         last_guard_target = context.get("last_guard_target_id") or context.get("last_guard_target")
         candidates = [pid for pid in alive if pid != last_guard_target] or alive
         target = random.choice(candidates) if candidates else None
+        if target:
+            reasoning = f"我决定守护 {target}。"
+        else:
+            reasoning = "当前没有可守护目标，我本轮未守护。"
         return {
             "action": {"type": "guard", "target": target},
-            "reasoning": "fallback/guard_random",
+            "reasoning": reasoning,
         }
 
     @staticmethod
@@ -99,9 +165,13 @@ class FallbackStrategies:
         me = context.get("player_id")
         candidates = [pid for pid in alive if pid != me]
         target = random.choice(candidates) if candidates else None
+        if target:
+            reasoning = f"第一夜信息有限，我查验了 {target} 以获取身份线索。"
+        else:
+            reasoning = "当前没有可查验目标，我本轮未完成查验。"
         return {
             "action": {"type": "check", "target": target},
-            "reasoning": "fallback/seer_random",
+            "reasoning": reasoning,
         }
 
     @staticmethod
@@ -110,9 +180,17 @@ class FallbackStrategies:
         me = context.get("player_id")
         candidates = [pid for pid in alive if pid != me]
         target = random.choice(candidates) if candidates else None
+        if target:
+            reasoning = f"信息有限，我投票给 {target}。"
+            speech = f"当前信息有限，我投票给 {target}。"
+        else:
+            reasoning = "当前没有可投目标，我选择弃票。"
+            speech = "当前没有可投目标，我选择弃票。"
         return {
             "action": {"type": "vote", "target": target},
-            "reasoning": "fallback/vote_random",
+            "reasoning": reasoning,
+            "speech": speech,
+            "thinking": reasoning,
         }
 
     @staticmethod
@@ -120,6 +198,8 @@ class FallbackStrategies:
         role = context.get("role", Role.VILLAGER.value)
         return {
             "action": {"type": "speak", "target": None},
+            "speech": "我先听听大家的发言，再给出判断。",
+            "thinking": f"我是{role}，当前信息有限，先观察发言逻辑。",
             "reasoning": f"我是{role}，当前信息有限，先观察发言逻辑。",
         }
 
@@ -129,7 +209,11 @@ class FallbackStrategies:
         me = context.get("player_id")
         candidates = [pid for pid in alive if pid != me]
         target = random.choice(candidates) if candidates else None
+        if target:
+            reasoning = f"我决定开枪带走 {target}。"
+        else:
+            reasoning = "当前没有合适目标，我本轮不开枪。"
         return {
             "action": {"type": "shoot", "target": target},
-            "reasoning": "fallback/hunter_random",
+            "reasoning": reasoning,
         }

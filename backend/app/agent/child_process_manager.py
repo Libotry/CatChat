@@ -3,6 +3,8 @@ from __future__ import annotations
 import subprocess
 import sys
 import time
+import socket
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from dataclasses import dataclass
 from pathlib import Path
 from threading import RLock
@@ -43,9 +45,12 @@ class ChildAgentProcessManager:
     ) -> Dict[str, str]:
         self.stop_room(room_id)
         created: List[ChildAgentProcess] = []
+        reserved_ports: set[int] = set()
         try:
             for idx, player_id in enumerate(player_ids):
-                port = start_port + idx
+                preferred_port = start_port + idx
+                port = self._next_available_port(host, preferred_port, reserved_ports)
+                reserved_ports.add(port)
                 cmd = [
                     sys.executable,
                     "-m",
@@ -66,8 +71,16 @@ class ChildAgentProcessManager:
                     port=port,
                     process=proc,
                 )
-                self._wait_health(child.endpoint, startup_timeout_sec)
                 created.append(child)
+
+            max_workers = max(1, len(created))
+            with ThreadPoolExecutor(max_workers=max_workers) as executor:
+                future_map = {
+                    executor.submit(self._wait_health, child.endpoint, startup_timeout_sec): child
+                    for child in created
+                }
+                for future in as_completed(future_map):
+                    future.result()
 
             with self._lock:
                 self._by_room[room_id] = created
@@ -78,11 +91,44 @@ class ChildAgentProcessManager:
                 self._stop_process(item.process)
             raise
 
+    @staticmethod
+    def _is_port_available(host: str, port: int) -> bool:
+        with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as sock:
+            sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+            try:
+                sock.bind((host, port))
+                return True
+            except OSError:
+                return False
+
+    @classmethod
+    def _next_available_port(
+        cls,
+        host: str,
+        start_port: int,
+        reserved_ports: set[int],
+        max_scan: int = 200,
+    ) -> int:
+        port = start_port
+        for _ in range(max_scan):
+            if port not in reserved_ports and cls._is_port_available(host, port):
+                return port
+            port += 1
+            if port > 65535:
+                port = 1024
+        raise ValueError(f"no available port found from {start_port} within scan window={max_scan}")
+
     def stop_room(self, room_id: str) -> None:
         with self._lock:
             items = self._by_room.pop(room_id, [])
         for item in items:
             self._stop_process(item.process)
+
+    def stop_all(self) -> None:
+        with self._lock:
+            all_rooms = list(self._by_room.keys())
+        for room_id in all_rooms:
+            self.stop_room(room_id)
 
     def status(self, room_id: str) -> Dict[str, dict]:
         with self._lock:

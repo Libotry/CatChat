@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import logging
 import os
 import re
 import subprocess
@@ -25,13 +26,26 @@ class ActRequest(BaseModel):
 class ActResponse(BaseModel):
     action: Dict[str, Any]
     reasoning: str = ""
+    speech: str = ""
+    thinking: str = ""
     timestamp: int
 
 
 app = FastAPI(title="Cat Agent Template", version="0.1.0")
+logger = logging.getLogger("uvicorn.error")
+logger.setLevel(logging.INFO)
 
 MODEL_TYPE = os.getenv("MODEL_TYPE", "cat-agent")
 DEFAULT_API_TIMEOUT_SEC = int(os.getenv("CAT_AGENT_API_TIMEOUT", "30"))
+LLM_LOG_MAX_CHARS = max(100, int(os.getenv("CAT_LLM_LOG_MAX_CHARS", "1024")))
+
+
+def _clip_text(text: str, limit: int = LLM_LOG_MAX_CHARS) -> str:
+    if text is None:
+        return ""
+    if len(text) <= limit:
+        return text
+    return text[:limit] + f" ...[truncated {len(text) - limit} chars]"
 
 
 def _mock_action(req: ActRequest) -> Dict[str, Any]:
@@ -143,10 +157,18 @@ def _run_cli_action(req: ActRequest, cfg: Dict[str, Any]) -> Dict[str, Any]:
     reasoning = data.get("reasoning", "")
     if not isinstance(reasoning, str):
         reasoning = str(reasoning)
+    speech = data.get("speech", "")
+    if not isinstance(speech, str):
+        speech = str(speech)
+    thinking = data.get("thinking", "")
+    if not isinstance(thinking, str):
+        thinking = str(thinking)
 
     return {
         "action": data["action"],
         "reasoning": reasoning,
+        "speech": speech,
+        "thinking": thinking,
     }
 
 
@@ -244,11 +266,68 @@ def _run_api_action(req: ActRequest, cfg: Dict[str, Any]) -> Dict[str, Any]:
 
     provider = _detect_provider(cfg)
     prompt = _build_prompt(req)
+    logger.info(
+        "[LLM][request] provider=%s model=%s player=%s phase=%s prompt=%s",
+        provider,
+        model_name,
+        req.player_id,
+        req.phase,
+        _clip_text(prompt),
+    )
+    retry_max = max(
+        0,
+        int(
+            cfg.get("api_retry_max")
+            or os.getenv("CAT_AGENT_API_RETRY_MAX", "2")
+        ),
+    )
+    retry_backoff_sec = max(
+        0.1,
+        float(
+            cfg.get("api_retry_backoff_sec")
+            or os.getenv("CAT_AGENT_API_RETRY_BACKOFF_SEC", "0.8")
+        ),
+    )
 
-    if provider == "claude":
-        content = _call_claude(api_url, api_key, model_name, prompt, timeout_sec)
-    else:
-        content = _call_openai_compatible(api_url, api_key, model_name, prompt, timeout_sec)
+    def _call_once() -> str:
+        if provider == "claude":
+            return _call_claude(api_url, api_key, model_name, prompt, timeout_sec)
+        return _call_openai_compatible(api_url, api_key, model_name, prompt, timeout_sec)
+
+    content = ""
+    last_error: Exception | None = None
+    for attempt in range(retry_max + 1):
+        try:
+            content = _call_once()
+            last_error = None
+            break
+        except httpx.ReadTimeout as exc:
+            last_error = RuntimeError(f"model api timeout (attempt={attempt + 1})")
+            if attempt < retry_max:
+                time.sleep(retry_backoff_sec * (2 ** attempt))
+                continue
+        except httpx.HTTPStatusError as exc:
+            status = exc.response.status_code if exc.response is not None else 0
+            transient = status in {429, 500, 502, 503, 504}
+            last_error = RuntimeError(f"model api http={status} (attempt={attempt + 1})")
+            if transient and attempt < retry_max:
+                time.sleep(retry_backoff_sec * (2 ** attempt))
+                continue
+        except Exception as exc:  # noqa: BLE001
+            last_error = exc
+        break
+
+    if last_error is not None:
+        raise last_error
+
+    logger.info(
+        "[LLM][response] provider=%s model=%s player=%s phase=%s content=%s",
+        provider,
+        model_name,
+        req.player_id,
+        req.phase,
+        _clip_text(content),
+    )
 
     parsed = _parse_json_from_text(content)
     action = parsed.get("action")
@@ -257,10 +336,18 @@ def _run_api_action(req: ActRequest, cfg: Dict[str, Any]) -> Dict[str, Any]:
     reasoning = parsed.get("reasoning", "")
     if not isinstance(reasoning, str):
         reasoning = str(reasoning)
+    speech = parsed.get("speech", "")
+    if not isinstance(speech, str):
+        speech = str(speech)
+    thinking = parsed.get("thinking", "")
+    if not isinstance(thinking, str):
+        thinking = str(thinking)
 
     return {
         "action": action,
         "reasoning": reasoning,
+        "speech": speech,
+        "thinking": thinking,
     }
 
 
@@ -282,10 +369,10 @@ def act(req: ActRequest) -> ActResponse:
         try:
             decision = _run_cli_action(req, cfg)
             action = decision["action"]
-            reasoning = (
-                f"[cli:{MODEL_TYPE}] "
-                f"{decision.get('reasoning', '')}"
-            ).strip()
+            raw_reasoning = str(decision.get("reasoning") or "").strip()
+            reasoning = (f"[cli:{MODEL_TYPE}] {raw_reasoning}").strip() if raw_reasoning else ""
+            speech = str(decision.get("speech") or "").strip()
+            thinking = str(decision.get("thinking") or "").strip()
         except Exception as exc:  # noqa: BLE001
             fallback = _mock_action(req)
             action = fallback["action"]
@@ -293,14 +380,16 @@ def act(req: ActRequest) -> ActResponse:
                 f"[cli-error:{MODEL_TYPE}] {exc}; "
                 f"fallback={fallback.get('reasoning', '')}"
             )
+            speech = ""
+            thinking = ""
     else:
         try:
             decision = _run_api_action(req, cfg)
             action = decision["action"]
-            reasoning = (
-                f"[api:{MODEL_TYPE}] "
-                f"{decision.get('reasoning', '')}"
-            ).strip()
+            raw_reasoning = str(decision.get("reasoning") or "").strip()
+            reasoning = (f"[api:{MODEL_TYPE}] {raw_reasoning}").strip() if raw_reasoning else ""
+            speech = str(decision.get("speech") or "").strip()
+            thinking = str(decision.get("thinking") or "").strip()
         except Exception as exc:  # noqa: BLE001
             fallback = _mock_action(req)
             action = fallback["action"]
@@ -308,9 +397,13 @@ def act(req: ActRequest) -> ActResponse:
                 f"[api-error:{MODEL_TYPE}] {exc}; "
                 f"fallback={fallback.get('reasoning', '')}"
             )
+            speech = ""
+            thinking = ""
 
     return ActResponse(
         action=action,
         reasoning=reasoning,
+        speech=speech,
+        thinking=thinking,
         timestamp=int(time.time()),
     )

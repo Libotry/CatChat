@@ -3,13 +3,18 @@ from __future__ import annotations
 import asyncio
 import json
 from datetime import datetime
+import logging
+import os
 
 from fastapi import FastAPI, WebSocket, WebSocketDisconnect
 from fastapi.middleware.cors import CORSMiddleware
 
 from app.api.deps import room_manager
+from app.config.frontend_profile_env import load_frontend_profile
 from app.api.rest import router as rest_router
 from app.websocket.handler import ws_manager
+
+logger = logging.getLogger(__name__)
 
 app = FastAPI(
     title="Werewolf Backend",
@@ -34,7 +39,60 @@ def health() -> dict:
         "status": "ok",
         "service": "werewolf-backend",
         "summary": room_manager.health_summary(),
+        "auto_bootstrap": getattr(app.state, "auto_bootstrap", {"status": "not-run"}),
     }
+
+
+@app.on_event("startup")
+async def auto_bootstrap_on_startup() -> None:
+    try:
+        auto_bootstrap_enabled = str(os.getenv("CATCHAT_AUTO_BOOTSTRAP_ON_STARTUP", "1")).strip().lower() in {"1", "true", "yes", "on"}
+        if not auto_bootstrap_enabled:
+            app.state.auto_bootstrap = {
+                "status": "skipped",
+                "reason": "auto_bootstrap_disabled",
+            }
+            return
+
+        profile = load_frontend_profile()
+        cats = profile.get("cats") if isinstance(profile, dict) else []
+        if not isinstance(cats, list) or len(cats) == 0:
+            app.state.auto_bootstrap = {
+                "status": "skipped",
+                "reason": "no_cats_in_env",
+            }
+            return
+
+        result = await asyncio.to_thread(room_manager.bootstrap_from_frontend_env)
+        bootstrap_result = result.get("bootstrap") if isinstance(result, dict) else {}
+        bootstrap_mode = None
+        if isinstance(bootstrap_result, dict):
+            bootstrap_mode = bootstrap_result.get("startup_mode") or bootstrap_result.get("mode")
+            if bootstrap_mode is None and bootstrap_result.get("reused") is True:
+                bootstrap_mode = "reused"
+        app.state.auto_bootstrap = {
+            "status": "ok",
+            "room_id": result.get("room_id"),
+            "player_count": result.get("player_count"),
+            "source": result.get("source"),
+            "bootstrap_mode": bootstrap_mode,
+            "bootstrap": bootstrap_result if isinstance(bootstrap_result, dict) else None,
+        }
+    except Exception as exc:  # noqa: BLE001
+        logger.exception("auto bootstrap from env failed")
+        app.state.auto_bootstrap = {
+            "status": "failed",
+            "error": str(exc),
+        }
+
+
+@app.on_event("shutdown")
+async def cleanup_on_shutdown() -> None:
+    try:
+        await asyncio.to_thread(room_manager.shutdown_cleanup)
+        logger.info("graceful shutdown cleanup completed: child agent ports released")
+    except Exception as exc:  # noqa: BLE001
+        logger.exception("shutdown cleanup failed: %s", exc)
 
 
 def _active_players_for_phase(room) -> list[str]:

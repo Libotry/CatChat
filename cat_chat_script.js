@@ -31,6 +31,10 @@ const WEREWOLF_ROLES = [
     { id:'fool',name:'白痴',icon:'🤹',team:'good',desc:'白天被放逐时可翻牌免死一次' }
 ];
 const MONITOR_CONFIG_STORAGE_KEY = 'catchat.monitor.config.v1';
+const TTS_VOICE_MAP_STORAGE_KEY = 'catchat.tts.voice.map.v1';
+const TTS_SETTINGS_STORAGE_KEY = 'catchat.tts.settings.v1';
+const WEREWOLF_AUTO_ADVANCE_DELAY_MS = 12000;
+const WEREWOLF_BACKEND_AUTO_ADVANCE_DELAY_MS = 1200;
 
 // ====================== State ======================
 let cats = [], messages = [];
@@ -44,10 +48,13 @@ let wfState = {
     round:0,
     roles:{},
     eliminated:[],
+    eliminatedCauseByCatId:{},
     phaseMessages:[],
-    backendLinked:false,
-    linkedRoomId:''
+    backendLinked:true,
+    linkedRoomId:'',
+    hideNightRoleForAudience:true
 };
+let wfAutoAdvanceTimer = null;
 let plState = { active:false, phase:'idle', requirement:'', roles:{}, results:{} };
 let cliProxy = { enabled: false, url: 'http://localhost:3456', connected: false };
 let dbState = { active:false, round:0, maxRounds:2, turnIndex:0, order:[], queue:[], speaking:false };
@@ -64,20 +71,262 @@ let monitorState = {
     speechSeenKeys: {},
     speechRenderedKeys: {},
     narrationSeenKeys: {},
+    lastStateOrder: -1,
+    pendingPhaseChangedPayload: null,
     players: [],
     playerMap: {},
     playerBindings: {},
+    catOnlineById: {},
     agentHost: 'http://127.0.0.1',
     agentStartPort: 9101,
     modelApiUrl: '',
     modelApiKey: '',
     modelName: '',
-    cliCommand: ''
+    cliCommand: '',
+    aiGod: false,
+    godCatId: '',
+    hideNightRoleForAudience: true,
+    showThoughtInMonitor: true
 };
+let monitorForceApplying = false;
+
+let ttsState = {
+    enabled: true,
+    rate: 1,
+    volume: 1,
+    initialized: false,
+    supported: typeof window !== 'undefined' && typeof window.speechSynthesis !== 'undefined' && typeof window.SpeechSynthesisUtterance !== 'undefined',
+    voices: [],
+    voiceMap: {}
+};
+
+function ttsSaveSettings() {
+    try {
+        localStorage.setItem(TTS_SETTINGS_STORAGE_KEY, JSON.stringify({
+            enabled: !!ttsState.enabled,
+            rate: Number(ttsState.rate || 1),
+            volume: Number(ttsState.volume || 1)
+        }));
+    } catch (_) {}
+}
+
+function ttsLoadSettings() {
+    try {
+        var raw = localStorage.getItem(TTS_SETTINGS_STORAGE_KEY);
+        if (!raw) return;
+        var parsed = JSON.parse(raw);
+        if (!parsed || typeof parsed !== 'object') return;
+        if (typeof parsed.enabled === 'boolean') ttsState.enabled = parsed.enabled;
+        if (Number.isFinite(parsed.rate)) ttsState.rate = Math.max(0.6, Math.min(1.6, Number(parsed.rate)));
+        if (Number.isFinite(parsed.volume)) ttsState.volume = Math.max(0, Math.min(1, Number(parsed.volume)));
+    } catch (_) {}
+}
+
+function ttsUpdateSettingsUI() {
+    var cb = document.getElementById('ttsEnabled');
+    var label = document.getElementById('ttsEnabledLabel');
+    var rate = document.getElementById('ttsRate');
+    var rateValue = document.getElementById('ttsRateValue');
+    var volume = document.getElementById('ttsVolume');
+    var volumeValue = document.getElementById('ttsVolumeValue');
+    if (!cb || !label || !rate || !rateValue || !volume || !volumeValue) return;
+
+    cb.checked = !!ttsState.enabled;
+    label.textContent = ttsState.enabled ? '已启用' : '未启用';
+    label.style.color = ttsState.enabled ? '#16a34a' : '';
+
+    rate.value = String(Number(ttsState.rate || 1));
+    rateValue.textContent = Number(ttsState.rate || 1).toFixed(2) + 'x';
+
+    volume.value = String(Number(ttsState.volume == null ? 1 : ttsState.volume));
+    volumeValue.textContent = Math.round(Number(ttsState.volume == null ? 1 : ttsState.volume) * 100) + '%';
+
+    var disabled = !ttsState.supported;
+    cb.disabled = disabled;
+    rate.disabled = disabled;
+    volume.disabled = disabled;
+    if (disabled) {
+        label.textContent = '浏览器不支持';
+        label.style.color = '#9ca3af';
+    }
+}
+
+function ttsHash(text) {
+    var raw = String(text || '');
+    var h = 0;
+    for (var i = 0; i < raw.length; i++) {
+        h = (h * 31 + raw.charCodeAt(i)) >>> 0;
+    }
+    return h;
+}
+
+function ttsLoadVoiceMap() {
+    try {
+        var raw = localStorage.getItem(TTS_VOICE_MAP_STORAGE_KEY);
+        if (!raw) return {};
+        var parsed = JSON.parse(raw);
+        return (parsed && typeof parsed === 'object') ? parsed : {};
+    } catch (_) {
+        return {};
+    }
+}
+
+function ttsSaveVoiceMap() {
+    try {
+        localStorage.setItem(TTS_VOICE_MAP_STORAGE_KEY, JSON.stringify(ttsState.voiceMap || {}));
+    } catch (_) {}
+}
+
+function ttsRefreshVoices() {
+    if (!ttsState.supported) return;
+    var all = window.speechSynthesis.getVoices() || [];
+    var zh = all.filter(function(v) { return /^zh/i.test(v.lang || ''); });
+    ttsState.voices = zh.length ? zh : all;
+}
+
+function ttsEnsureSpeakerAssignments() {
+    if (!ttsState.supported) return;
+    if (!Array.isArray(ttsState.voices) || !ttsState.voices.length) return;
+    var map = ttsState.voiceMap || {};
+    var keys = ['judge', 'owner'];
+    cats.forEach(function(cat) {
+        if (cat && cat.id) keys.push(cat.id);
+    });
+    keys.forEach(function(key) {
+        if (map[key]) return;
+        var idx = ttsHash(key) % ttsState.voices.length;
+        map[key] = ttsState.voices[idx].voiceURI;
+    });
+    ttsState.voiceMap = map;
+    ttsSaveVoiceMap();
+}
+
+function ttsInit() {
+    if (!ttsState.supported || ttsState.initialized) return;
+    ttsState.initialized = true;
+    ttsLoadSettings();
+    ttsState.voiceMap = ttsLoadVoiceMap();
+    ttsRefreshVoices();
+    ttsEnsureSpeakerAssignments();
+    if (typeof window.speechSynthesis.onvoiceschanged !== 'undefined') {
+        window.speechSynthesis.onvoiceschanged = function() {
+            ttsRefreshVoices();
+            ttsEnsureSpeakerAssignments();
+        };
+    }
+    document.addEventListener('click', function() {
+        try { window.speechSynthesis.resume(); } catch (_) {}
+    }, { once: true });
+}
+
+function ttsNormalizeText(text) {
+    var raw = String(text || '');
+    raw = raw.replace(/\[[^\]]+\]/g, '');
+    raw = raw.replace(/【[^】]{1,30}】/g, '');
+    raw = raw.replace(/[\[{(（]\s*(?:第\s*\d+\s*[轮回局天夜]|第\s*\d+\s*轮|夜晚|白天|系统|旁白|公告|播报|阶段|回合|投票|讨论)\s*[\]}）)]/g, '');
+    raw = raw.replace(/(?:^|[，。；、\s])(?:第\s*\d+\s*轮|第\s*\d+\s*[天夜]|夜晚|白天|系统|旁白|公告|播报|阶段|回合)\s*[:：]/g, ' ');
+    raw = raw.replace(/[\u{1F300}-\u{1FAFF}\u{2600}-\u{27BF}\u{FE0F}]/gu, '');
+    raw = raw.replace(/[（(]\s*(?:角色|身份|职业)\s*[:：]\s*[^）)]+[）)]/g, '');
+    raw = raw.replace(/[（(]\s*(?:狼人|村民|预言家|女巫|猎人|守卫|白痴|法官|上帝|AI法官)\s*[）)]/g, '');
+    raw = raw.replace(/(?:^|[，。；、\s])(?:角色|身份|职业)\s*[:：]\s*(?:狼人|村民|预言家|女巫|猎人|守卫|白痴|法官|上帝|AI法官)(?=$|[，。；、\s])/g, ' ');
+    raw = raw.replace(/^\s*(?:狼人|村民|预言家|女巫|猎人|守卫|白痴|法官|上帝|AI法官)\s*[:：]\s*/g, '');
+    raw = raw.replace(/^\s*[^，。；、:：]{1,20}[（(]\s*(?:狼人|村民|预言家|女巫|猎人|守卫|白痴|法官|上帝|AI法官)\s*[）)]\s*[:：]?\s*/g, '');
+    raw = raw.replace(/\s*[（(]\s*(?:狼人|村民|预言家|女巫|猎人|守卫|白痴|法官|上帝|AI法官)\s*[）)]\s*/g, ' ');
+    raw = raw.replace(/^\s*(?:系统|旁白|公告|播报|阶段|回合|第\s*\d+\s*轮|第\s*\d+\s*[天夜])\s*[:：\-—]+\s*/g, '');
+    raw = raw.replace(/^\s*(?:\d+\.|\d+、|[-•·])\s*/g, '');
+    raw = raw.replace(/[\r\n]+/g, '，');
+    raw = raw.replace(/\s+/g, ' ').trim();
+    if (raw.length > 1200) raw = raw.slice(0, 1200);
+    return raw;
+}
+
+function ttsSplitSegments(text) {
+    var normalized = String(text || '').trim();
+    if (!normalized) return [];
+    var parts = normalized.split(/(?<=[。！？!?；;])/);
+    var maxLen = 90;
+    var segments = [];
+    var current = '';
+    parts.forEach(function(part) {
+        var p = String(part || '').trim();
+        if (!p) return;
+        if (!current) {
+            current = p;
+            return;
+        }
+        if ((current + p).length <= maxLen) {
+            current += p;
+        } else {
+            segments.push(current);
+            current = p;
+        }
+    });
+    if (current) segments.push(current);
+
+    var flat = [];
+    segments.forEach(function(seg) {
+        if (seg.length <= maxLen) {
+            flat.push(seg);
+            return;
+        }
+        for (var i = 0; i < seg.length; i += maxLen) {
+            flat.push(seg.slice(i, i + maxLen));
+        }
+    });
+    return flat.slice(0, 20);
+}
+
+function ttsInferSystemSpeaker(text, cls) {
+    var t = String(text || '');
+    var c = String(cls || '');
+    if (/法官|AI法官|上帝视角/.test(t)) return { key: 'judge', name: '法官' };
+    if (/^⚖️|^🤖/.test(t)) return { key: 'judge', name: '法官' };
+    if (c.indexOf('pipeline-msg') !== -1 && /投票|出局|天亮|天黑/.test(t)) return { key: 'judge', name: '法官' };
+    return null;
+}
+
+function ttsSpeak(speakerKey, speakerName, text) {
+    if (!ttsState.supported || !ttsState.enabled) return;
+    var content = ttsNormalizeText(text);
+    if (!content) return;
+    if (!ttsState.voices.length) ttsRefreshVoices();
+    if (!ttsState.voices.length) return;
+
+    if (!ttsState.voiceMap[speakerKey]) {
+        var idx = ttsHash(speakerKey) % ttsState.voices.length;
+        ttsState.voiceMap[speakerKey] = ttsState.voices[idx].voiceURI;
+        ttsSaveVoiceMap();
+    }
+
+    var voice = ttsState.voices.find(function(v) {
+        return v.voiceURI === ttsState.voiceMap[speakerKey];
+    }) || ttsState.voices[0];
+    if (!voice) return;
+
+    var segments = ttsSplitSegments(content);
+    if (!segments.length) return;
+    segments.forEach(function(seg) {
+        var utter = new SpeechSynthesisUtterance(seg);
+        utter.voice = voice;
+        utter.lang = voice.lang || 'zh-CN';
+        utter.volume = Math.max(0, Math.min(1, Number(ttsState.volume == null ? 1 : ttsState.volume)));
+        if (speakerKey === 'judge') {
+            utter.rate = Math.max(0.6, Math.min(1.6, Number(ttsState.rate || 1) * 0.96));
+            utter.pitch = 0.9;
+        } else {
+            utter.rate = Math.max(0.6, Math.min(1.6, Number(ttsState.rate || 1)));
+            utter.pitch = 1.08;
+        }
+        try {
+            window.speechSynthesis.speak(utter);
+        } catch (_) {}
+    });
+}
 
 function monitorPhaseLabel(phase) {
     var map = {
         prepare: '准备阶段',
+        night_wolf_discuss: '夜晚·狼人讨论',
         night_wolf: '夜晚·狼人行动',
         night_guard: '夜晚·守卫行动',
         night_witch: '夜晚·女巫行动',
@@ -90,6 +339,42 @@ function monitorPhaseLabel(phase) {
     return map[phase] || phase || '未知阶段';
 }
 
+function monitorPhaseOrder(phase) {
+    var map = {
+        prepare: 0,
+        night_wolf_discuss: 1,
+        night_wolf: 2,
+        night_guard: 3,
+        night_witch: 4,
+        night_seer: 5,
+        day_announce: 6,
+        day_discuss: 7,
+        day_vote: 8,
+        game_over: 9
+    };
+    return map[phase] != null ? map[phase] : 99;
+}
+
+function monitorStateOrderValue(state) {
+    var roundNo = parseInt((state && state.round_no), 10);
+    if (isNaN(roundNo) || roundNo < 0) roundNo = 0;
+    return roundNo * 100 + monitorPhaseOrder((state && state.phase) || '');
+}
+
+function monitorSortSpeechHistory(rows) {
+    return (rows || []).slice().sort(function(a, b) {
+        var ta = Date.parse((a && a.timestamp) || '') || 0;
+        var tb = Date.parse((b && b.timestamp) || '') || 0;
+        if (ta !== tb) return ta - tb;
+        var pa = monitorPhaseOrder((a && a.phase) || '');
+        var pb = monitorPhaseOrder((b && b.phase) || '');
+        if (pa !== pb) return pa - pb;
+        var aa = (a && a.player_id) || '';
+        var bb = (b && b.player_id) || '';
+        return aa.localeCompare(bb);
+    });
+}
+
 function monitorDeathCauseLabel(cause) {
     var map = {
         wolf: '被狼人袭击',
@@ -98,6 +383,16 @@ function monitorDeathCauseLabel(cause) {
         hunter: '被猎人带走'
     };
     return map[cause] || cause || '未知原因';
+}
+
+function werewolfEliminatedCauseLabel(cause) {
+    var map = {
+        wolf: '被狼人刀',
+        poison: '被女巫毒杀',
+        vote: '被投死',
+        hunter: '被猎人带走'
+    };
+    return map[cause] || '淘汰';
 }
 
 function monitorPlayerName(state, playerId) {
@@ -119,19 +414,24 @@ function monitorNarrateFromPhaseChanged(payload) {
     var consensus = payload.god_view.consensus_target || '';
     if (!consensus) return;
     var key = ['godview', roomId, payload.phase || '-', consensus].join('|');
-    monitorNarrateOnce(key, '⚖️ 法官（上帝视角）：狼人夜间目标倾向 ' + consensus + '。', 'pipeline-msg');
+    var prefix = payload.phase === 'night_wolf' ? '⚖️ 法官（上帝视角）：狼人讨论后目标一致为 ' : '⚖️ 法官（上帝视角）：狼人夜间目标倾向 ';
+    monitorNarrateOnce(key, prefix + consensus + '。', 'pipeline-msg');
 }
 
 function monitorNarrateFromRoomState(state) {
     if (!state) return;
+    if (monitorState.aiGod) return;
     var roomId = state.room_id || monitorState.roomId || '-';
     var roundNo = state.round_no || 0;
     var phase = state.phase || 'unknown';
     var phaseKey = ['phase', roomId, roundNo, phase].join('|');
 
         switch (phase) {
+            case 'night_wolf_discuss':
+                monitorNarrateOnce(phaseKey, '⚖️ 法官：天黑请闭眼，狼人请睁眼。先进入夜间讨论阶段，交换判断并达成一致目标。', 'pipeline-msg');
+                break;
             case 'night_wolf':
-                monitorNarrateOnce(phaseKey, '⚖️ 法官：天黑请闭眼，狼人请睁眼并选择目标。', 'pipeline-msg');
+                monitorNarrateOnce(phaseKey, '⚖️ 法官：天黑请闭眼，狼人请睁眼并执行最终猎杀目标。', 'pipeline-msg');
                 break;
             case 'night_guard':
                 monitorNarrateOnce(phaseKey, '⚖️ 法官：守卫请行动，选择今晚守护对象。', 'pipeline-msg');
@@ -223,23 +523,44 @@ function werewolfSyncButtonsByState() {
     startBtn.disabled = wfState.active;
     nextBtn.disabled = !wfState.active;
     endBtn.disabled = !wfState.active;
-    revealBtn.disabled = wfState.backendLinked || !wfState.active;
+    revealBtn.disabled = true;
 }
 
-function werewolfRefreshLinkButton() {
-    var btn = document.getElementById('wpLinkBtn');
-    if (!btn) return;
-    if (wfState.backendLinked) {
-        btn.textContent = '🔗 已联动';
-        btn.style.boxShadow = '0 0 0 2px rgba(59,130,246,0.35)';
-    } else {
-        btn.textContent = '🔗 联动后端';
-        btn.style.boxShadow = '';
+function werewolfAutoDelayMs() {
+    return WEREWOLF_BACKEND_AUTO_ADVANCE_DELAY_MS;
+}
+
+function werewolfStopAutoAdvance() {
+    if (wfAutoAdvanceTimer) {
+        clearTimeout(wfAutoAdvanceTimer);
+        wfAutoAdvanceTimer = null;
     }
 }
 
+function werewolfScheduleAutoAdvance(delayMs) {
+    werewolfStopAutoAdvance();
+    if (!wfState.active) return;
+    var nextDelay = typeof delayMs === 'number' ? delayMs : werewolfAutoDelayMs();
+    wfAutoAdvanceTimer = setTimeout(function() {
+        if (!wfState.active) return;
+        werewolfNextPhase(true);
+    }, nextDelay);
+}
+
+function werewolfStartAutoAdvance() {
+    if (!wfState.active) return;
+    werewolfScheduleAutoAdvance(werewolfAutoDelayMs());
+}
+
+function werewolfRefreshLinkButton() {
+    return;
+}
+
+function werewolfShouldHideNightRoleBadge(isNight) {
+    return gameMode === 'werewolf' && !!isNight && !judgeView && !!wfState.hideNightRoleForAudience;
+}
+
 function werewolfSyncFromBackendState(state) {
-    if (!wfState.backendLinked) return;
     if (wfState.linkedRoomId && state.room_id && state.room_id !== wfState.linkedRoomId) return;
 
     var players = state.players || [];
@@ -247,16 +568,49 @@ function werewolfSyncFromBackendState(state) {
     wfState.phase = werewolfMapBackendPhase(state.phase);
     wfState.round = state.round_no || wfState.round || 1;
     var eliminated = [];
+    var eliminatedCauseByCatId = {};
     var linkedRoles = {};
-    players.forEach(function(p) {
+    players.forEach(function(p, idx) {
         var bound = monitorState.playerBindings[p.player_id] || {};
+        if (!bound.catId && p && p.nickname) {
+            var foundByName = cats.find(function(cat) { return (cat.name || '').trim() === (p.nickname || '').trim(); });
+            if (foundByName) {
+                bound = {
+                    catId: foundByName.id,
+                    nickname: foundByName.name,
+                    breed: foundByName.breed,
+                    color: foundByName.color,
+                    emoji: foundByName.emoji,
+                    avatarUrl: foundByName.avatarUrl || ''
+                };
+                monitorState.playerBindings[p.player_id] = bound;
+            }
+        }
+        if (!bound.catId) {
+            var catByIndex = cats[idx];
+            if (catByIndex) {
+                bound = {
+                    catId: catByIndex.id,
+                    nickname: catByIndex.name,
+                    breed: catByIndex.breed,
+                    color: catByIndex.color,
+                    emoji: catByIndex.emoji,
+                    avatarUrl: catByIndex.avatarUrl || ''
+                };
+                monitorState.playerBindings[p.player_id] = bound;
+            }
+        }
         var catId = bound.catId;
         if (catId) {
-            if (!p.alive) eliminated.push(catId);
+            if (!p.alive) {
+                eliminated.push(catId);
+                if (p.death_cause) eliminatedCauseByCatId[catId] = p.death_cause;
+            }
             if (p.role) linkedRoles[catId] = werewolfRoleMeta(p.role);
         }
     });
     wfState.eliminated = eliminated;
+    wfState.eliminatedCauseByCatId = eliminatedCauseByCatId;
     wfState.roles = linkedRoles;
 
     werewolfSyncButtonsByState();
@@ -264,6 +618,7 @@ function werewolfSyncFromBackendState(state) {
     renderMembers();
 
     if (state.game_over) {
+        werewolfStopAutoAdvance();
         addSystemMessage('🏁 联动房间已结束，胜利方：' + (state.winner || '未知'), 'vote-msg');
     }
 }
@@ -275,24 +630,37 @@ function werewolfPseudoCat(playerId) {
     var avatar = CAT_BREED_AVATARS[idx % CAT_BREED_AVATARS.length];
     var mapped = monitorState.playerMap[playerId] || {};
     var bound = monitorState.playerBindings[playerId] || {};
+    var roleMeta = null;
+    if (mapped.role) {
+        roleMeta = werewolfRoleMeta(mapped.role);
+    } else if (bound.catId && wfState.roles && wfState.roles[bound.catId]) {
+        roleMeta = wfState.roles[bound.catId];
+    }
     return {
         id: 'linked_' + playerId,
         name: bound.nickname || mapped.nickname || playerId,
         emoji: bound.emoji || avatar.icon,
         color: bound.color || catColors[idx],
         breed: bound.breed || mapped.breed || avatar.breed,
-        avatarUrl: bound.avatarUrl || ''
+        avatarUrl: bound.avatarUrl || '',
+        role: roleMeta
     };
 }
 
 function werewolfRenderLinkedSpeech(entry) {
     if (!entry) return;
     // Handle god_narration entries from AI God Orchestrator
-    if (entry.player_id === 'god' || entry.event === 'god_narration') {
+    if (entry.event === 'god_narration') {
         var godContent = (entry.content || '').trim();
         if (!godContent) return;
         var prefix = entry.is_fallback ? '⚖️ 法官（托管）：' : '🤖 AI法官：';
         addSystemMessage(prefix + godContent, 'pipeline-msg');
+        return;
+    }
+    if (entry.player_id === 'god') {
+        var settleContent = (entry.content || '').trim();
+        if (!settleContent) return;
+        addSystemMessage('⚖️ 法官结算：' + settleContent, 'judge-settle-msg');
         return;
     }
     if (!entry.player_id) return;
@@ -302,6 +670,7 @@ function werewolfRenderLinkedSpeech(entry) {
     var cat = werewolfPseudoCat(entry.player_id);
     var isNight = (entry.phase || '').indexOf('night_') === 0;
     var phaseMap = {
+        night_wolf_discuss: '🌙 狼人讨论',
         night_wolf: '🌙 狼人行动',
         night_guard: '🌙 守卫行动',
         night_witch: '🌙 女巫行动',
@@ -313,6 +682,9 @@ function werewolfRenderLinkedSpeech(entry) {
     var phaseLabel = phaseMap[entry.phase] || monitorPhaseLabel(entry.phase);
     var content = (entry.content || '').trim();
     if (!content) content = '（无文本返回）';
+    if (entry.phase === 'night_wolf_discuss') {
+        content = '【讨论】' + content;
+    }
     if (entry.is_fallback) {
         if (/^fallback\//i.test(content)) {
             content = '系统降级托管：' + content.replace(/^fallback\//i, '');
@@ -324,9 +696,36 @@ function werewolfRenderLinkedSpeech(entry) {
         }
     }
     addCatMessage(cat, '【' + phaseLabel + '】' + content, isNight);
+    var thought = (entry.thought_content || '').trim();
+    var canShowThought = (gameMode === 'monitor' && !!monitorState.showThoughtInMonitor) || (gameMode === 'werewolf' && judgeView);
+    if (thought && canShowThought) {
+        addSystemMessage('🧠 ' + cat.name + '（仅法官可见思考）：' + thought, 'pipeline-msg thought-msg', { speaker: { key: '' } });
+        monitorApplyThoughtVisibility();
+    }
+}
+
+function monitorApplyThoughtVisibility() {
+    var show = !(gameMode === 'monitor' && !monitorState.showThoughtInMonitor);
+    document.querySelectorAll('.thought-msg').forEach(function(el) {
+        el.style.display = show ? '' : 'none';
+    });
+}
+
+function monitorToggleThoughtVisibility() {
+    var el = document.getElementById('monitorShowThought');
+    monitorState.showThoughtInMonitor = !(el && el.checked === false);
+    monitorPersistConfig();
+    monitorApplyThoughtVisibility();
+    monitorRenderSpeech();
 }
 
 function wpToggleAiGod() {
+    if (wfState.active) {
+        var wpCb = document.getElementById('wpAiGodToggle');
+        if (wpCb) wpCb.checked = !!monitorState.aiGod;
+        showToast('⚠️ 游戏已开始，不能再切换 AI 法官模式');
+        return;
+    }
     var checked = document.getElementById('wpAiGodToggle').checked;
     var sec = document.getElementById('wpAiGodConfig');
     if (sec) sec.style.display = checked ? 'block' : 'none';
@@ -336,38 +735,95 @@ function wpToggleAiGod() {
     var mnSec = document.getElementById('monitorGodConfig');
     if (mnSec) mnSec.style.display = checked ? 'block' : 'none';
     monitorState.aiGod = checked;
+    monitorSyncPlayerCountFromCats();
     monitorPersistConfig();
+    renderMembers();
 }
 
-function wpSyncGodConfig() {
-    // Sync werewolf panel god fields → monitor state
-    var fields = [
-        ['wpGodProvider', 'monitorGodProvider', 'godProvider'],
-        ['wpGodApiUrl', 'monitorGodApiUrl', 'godApiUrl'],
-        ['wpGodApiKey', 'monitorGodApiKey', 'godApiKey'],
-        ['wpGodModelName', 'monitorGodModelName', 'godModelName']
-    ];
-    fields.forEach(function(f) {
-        var val = (document.getElementById(f[0]) || {}).value || '';
-        var mnEl = document.getElementById(f[1]);
-        if (mnEl) mnEl.value = val;
-        monitorState[f[2]] = val;
-    });
+function wpToggleNightRoleMask() {
+    var el = document.getElementById('wpHideNightRole');
+    wfState.hideNightRoleForAudience = !(el && el.checked === false);
+    monitorState.hideNightRoleForAudience = !!wfState.hideNightRoleForAudience;
     monitorPersistConfig();
+    refreshWerewolfVisibility();
+}
+
+function monitorRenderGodCatSelectors() {
+    var monitorSel = document.getElementById('monitorGodCatId');
+    var wpSel = document.getElementById('wpGodCatId');
+    if (!monitorSel && !wpSel) return;
+
+    var current = String(monitorState.godCatId || '');
+    var hasCurrent = cats.some(function(cat) { return cat && cat.id === current; });
+    if (!hasCurrent) {
+        current = cats.length ? cats[0].id : '';
+        monitorState.godCatId = current;
+    }
+
+    var options = cats.map(function(cat) {
+        return '<option value="' + escapeHtml(cat.id) + '">' + escapeHtml(cat.name) + '</option>';
+    }).join('');
+    if (!options) {
+        options = '<option value="">暂无猫猫</option>';
+    }
+
+    [monitorSel, wpSel].forEach(function(sel) {
+        if (!sel) return;
+        sel.innerHTML = options;
+        sel.value = current;
+        sel.disabled = cats.length === 0;
+    });
+}
+
+function monitorPlayableCats() {
+    if (!monitorState.aiGod || !monitorState.godCatId) return cats.slice();
+    return cats.filter(function(cat) {
+        return cat && cat.id !== monitorState.godCatId;
+    });
+}
+
+function monitorLockGodConfigIfStarted() {
+    var started = !!wfState.active;
+    ['monitorAiGod', 'wpAiGodToggle', 'monitorGodCatId', 'wpGodCatId'].forEach(function(id) {
+        var el = document.getElementById(id);
+        if (!el) return;
+        el.disabled = started;
+    });
+}
+
+function monitorOnGodCatChange(source) {
+    if (wfState.active) {
+        showToast('⚠️ 游戏已开始，不能再修改 AI 法官');
+        monitorRenderGodCatSelectors();
+        return;
+    }
+    var from = source === 'wp' ? document.getElementById('wpGodCatId') : document.getElementById('monitorGodCatId');
+    var val = (from && from.value) ? from.value : '';
+    monitorState.godCatId = val;
+
+    var monitorSel = document.getElementById('monitorGodCatId');
+    var wpSel = document.getElementById('wpGodCatId');
+    if (monitorSel) monitorSel.value = val;
+    if (wpSel) wpSel.value = val;
+
+    monitorPersistConfig();
+    renderMembers();
+}
+
+function monitorJudgeModeLabel(data) {
+    var isAi = !!(data && data.ai_god);
+    if (!isAi) return '系统法官';
+    var judgeName = (data && data.god_cat_name) || '';
+    if (!judgeName) {
+        var judgeId = (data && data.god_cat_id) || monitorState.godCatId;
+        var found = cats.find(function(cat) { return cat && cat.id === judgeId; });
+        judgeName = found ? found.name : '';
+    }
+    return judgeName ? ('AI法官（' + judgeName + '）') : 'AI法官';
 }
 
 function werewolfToggleBackendLink() {
-    if (!wfState.backendLinked) {
-        wfState.backendLinked = true;
-        wfState.linkedRoomId = monitorRoomId() || '';
-        monitorState.speechRenderedKeys = {};
-        addSystemMessage('🔗 狼人杀模式已启用后端联动（将以前端猫猫配置自动建房并注册）。', 'pipeline-msg');
-    } else {
-        wfState.backendLinked = false;
-        wfState.linkedRoomId = '';
-        addSystemMessage('⛓️ 已取消狼人杀与监控房间联动。', 'pipeline-msg');
-    }
-    werewolfRefreshLinkButton();
+    wfState.backendLinked = true;
     werewolfSyncButtonsByState();
 }
 
@@ -404,6 +860,8 @@ var PIPELINE_ROLES = {
 
 // ====================== Init ======================
 function init() {
+    ttsInit();
+    ttsUpdateSettingsUI();
     renderEmojiPicker();
     renderColorPicker();
     updateProviderUI('openai');
@@ -412,13 +870,276 @@ function init() {
     pipelineUpdateRoleAssign();
     monitorInit();
     monitorSyncPlayerCountFromCats();
-    werewolfRefreshLinkButton();
+    loadCatsFromBackendEnvProfile();
+}
+
+function normalizeImportedCats(rawCats, startIndex) {
+    var idxSeed = startIndex || 0;
+    var list = [];
+    (rawCats || []).forEach(function(c, i) {
+        if (!c || !c.name || !c.provider) return;
+        var cfg = PROVIDERS[c.provider] || PROVIDERS.openai;
+        list.push({
+            id: c.id || (Date.now().toString() + '_' + (idxSeed + i)),
+            name: c.name,
+            emoji: c.emoji || '🐱',
+            avatarUrl: c.avatarUrl || '',
+            breed: c.breed || '家猫',
+            color: c.color || '#f582ae',
+            personality: c.personality || '',
+            provider: c.provider,
+            apiUrl: c.apiUrl || cfg.defaultUrl,
+            apiKey: c.apiKey || '',
+            model: c.model || cfg.defaultModel,
+            claudeVersion: c.claudeVersion || '2023-06-01',
+            badgeClass: c.badgeClass || cfg.badgeClass
+        });
+    });
+    return list;
+}
+
+function monitorProfilePayload() {
+    return {
+        cats: cats.map(function(c) {
+            return {
+                id: c.id,
+                name: c.name,
+                emoji: c.emoji,
+                avatarUrl: c.avatarUrl,
+                breed: c.breed,
+                color: c.color,
+                personality: c.personality,
+                provider: c.provider,
+                apiUrl: c.apiUrl,
+                apiKey: c.apiKey,
+                model: c.model,
+                claudeVersion: c.claudeVersion,
+                badgeClass: c.badgeClass
+            };
+        }),
+        monitor_config: {
+            apiBase: monitorState.apiBase,
+            playerCount: monitorState.playerCount,
+            agentHost: monitorState.agentHost,
+            agentStartPort: monitorState.agentStartPort,
+            modelApiUrl: monitorState.modelApiUrl,
+            modelApiKey: monitorState.modelApiKey,
+            modelName: monitorState.modelName,
+            cliCommand: monitorState.cliCommand,
+            aiGod: monitorState.aiGod || false,
+            godCatId: monitorState.godCatId || '',
+            hideNightRoleForAudience: !!wfState.hideNightRoleForAudience,
+            showThoughtInMonitor: !!monitorState.showThoughtInMonitor
+        }
+    };
+}
+
+function persistCatsToBackendEnv(reason, options) {
+    var opts = options || {};
+    var strict = !!opts.strict;
+    return monitorHttp('/api/frontend/profile', {
+        timeoutMs: 20000,
+        method: 'POST',
+        body: JSON.stringify(monitorProfilePayload())
+    }).then(function(resp) {
+        if (reason) {
+            monitorAddPhaseLog('配置已写入后端环境变量：' + reason);
+        }
+        var statusEl = document.getElementById('envSaveStatus');
+        if (statusEl) {
+            var ts = resp && resp.saved_at ? resp.saved_at : null;
+            var d = ts ? new Date(ts) : new Date();
+            statusEl.innerText = '已自动保存 ' + d.getHours().toString().padStart(2, '0') + ':' + d.getMinutes().toString().padStart(2, '0') + ':' + d.getSeconds().toString().padStart(2, '0');
+            statusEl.style.color = 'rgba(255,255,255,0.5)';
+        }
+        return resp;
+    }).catch(function(err) {
+        console.warn('persist frontend profile failed', err);
+        if (reason) {
+            monitorAddPhaseLog('写入后端环境变量失败：' + err.message);
+        }
+        var statusEl = document.getElementById('envSaveStatus');
+        if (statusEl) {
+            statusEl.innerText = '保存失败';
+            statusEl.style.color = '#ff6b6b';
+        }
+        if (strict) {
+            throw err;
+        }
+    });
+}
+
+function monitorSaveEnvProfile() {
+    monitorCollectInvokeConfig();
+    monitorPersistConfig();
+    persistCatsToBackendEnv('手动保存', { strict: true }).then(function() {
+        showToast('✅ 已保存到后端环境变量');
+    }).catch(function(err) {
+        showToast('❌ 保存失败：' + err.message);
+    });
+}
+
+function monitorForceApplyEnvProfile() {
+    if (monitorForceApplying) {
+        showToast('⏳ 正在强制同步，请稍候...');
+        return;
+    }
+    monitorForceApplying = true;
+    var btn = document.getElementById('monitorForceApplyBtn');
+    if (btn) {
+        btn.disabled = true;
+        btn.textContent = '⏳ 同步中...';
+    }
+
+    monitorCollectInvokeConfig();
+    monitorPersistConfig();
+    monitorAddPhaseLog('开始强制同步配置：写入环境变量并立即重建后端...');
+
+    monitorHttp('/api/frontend/profile/apply', {
+        timeoutMs: 86400000,
+        method: 'POST',
+        body: JSON.stringify(monitorProfilePayload())
+    })
+        .then(function(resp) {
+            var saved = (resp && resp.saved) || {};
+            var applied = (resp && resp.applied) || {};
+
+            var statusEl = document.getElementById('envSaveStatus');
+            if (statusEl) {
+                var ts = saved && saved.saved_at ? saved.saved_at : null;
+                var d = ts ? new Date(ts) : new Date();
+                statusEl.innerText = '已自动保存 ' + d.getHours().toString().padStart(2, '0') + ':' + d.getMinutes().toString().padStart(2, '0') + ':' + d.getSeconds().toString().padStart(2, '0');
+                statusEl.style.color = 'rgba(255,255,255,0.5)';
+            }
+
+            monitorState.roomId = applied.room_id || monitorState.roomId;
+            monitorState.ownerId = applied.owner_id || monitorState.ownerId;
+            monitorState.players = applied.players || monitorState.players;
+            monitorState.aiGod = !!applied.ai_god;
+            if (applied.god_cat_id) monitorState.godCatId = applied.god_cat_id;
+            wfState.linkedRoomId = monitorState.roomId;
+            monitorState.playerBindings = monitorBuildBindingMap(monitorState.players || []);
+            monitorApplyBootstrapRegistrationResult(applied);
+            var roomIdInput = document.getElementById('monitorRoomId');
+            if (roomIdInput && monitorState.roomId) roomIdInput.value = monitorState.roomId;
+            monitorSyncViewOptions();
+            renderMembers();
+            updateOnlineCount();
+
+            var boot = (applied && applied.bootstrap) || {};
+            var reg = (boot && boot.registered_agents) || {};
+            var agents = reg.agents || {};
+            var count = Object.keys(agents).length;
+            var judgeMode = monitorJudgeModeLabel(applied);
+            monitorAddPhaseLog('强制同步完成：后端已按最新环境变量重建并应用（' + count + '只，' + judgeMode + '）');
+            monitorRenderGlobal('同步完成 · room=' + (monitorState.roomId || '-') + ' · ' + judgeMode);
+
+            var roomId = monitorRoomId();
+            if (roomId) {
+                monitorHttp('/api/rooms/' + encodeURIComponent(roomId), { timeoutMs: 12000 }).then(function(state) {
+                    monitorApplyRoomState(state);
+                }).catch(function() {});
+            }
+            if (monitorState.isConnected) {
+                monitorConnectWs();
+            }
+            showToast('✅ 已强制同步并实时应用到后端');
+        })
+        .catch(function(err) {
+            monitorSetAllCatsOnline(false);
+            renderMembers();
+            updateOnlineCount();
+            monitorAddPhaseLog('强制同步失败：' + err.message);
+            showToast('❌ 强制同步失败：' + err.message);
+        })
+        .finally(function() {
+            monitorForceApplying = false;
+            if (btn) {
+                btn.disabled = false;
+                btn.textContent = '🚀 强制同步并应用';
+            }
+        });
+}
+
+function applyMonitorConfigFromProfile(cfg) {
+    if (!cfg || typeof cfg !== 'object') return;
+    monitorState.apiBase = cfg.apiBase || monitorState.apiBase;
+    monitorState.playerCount = parseInt(cfg.playerCount, 10) || monitorState.playerCount;
+    monitorState.agentHost = cfg.agentHost || monitorState.agentHost;
+    monitorState.agentStartPort = parseInt(cfg.agentStartPort, 10) || monitorState.agentStartPort;
+    monitorState.modelApiUrl = cfg.modelApiUrl || '';
+    monitorState.modelApiKey = cfg.modelApiKey || '';
+    monitorState.modelName = cfg.modelName || '';
+    monitorState.cliCommand = cfg.cliCommand || '';
+    monitorState.aiGod = !!cfg.aiGod;
+    monitorState.godCatId = cfg.godCatId || monitorState.godCatId || '';
+    if (typeof cfg.showThoughtInMonitor === 'boolean') {
+        monitorState.showThoughtInMonitor = cfg.showThoughtInMonitor;
+    }
+
+    var map = {
+        monitorApiBase: monitorState.apiBase,
+        monitorPlayerCount: String(monitorState.playerCount),
+        monitorAgentHost: monitorState.agentHost,
+        monitorAgentStartPort: String(monitorState.agentStartPort),
+        monitorModelApiUrl: monitorState.modelApiUrl,
+        monitorModelApiKey: monitorState.modelApiKey,
+        monitorModelName: monitorState.modelName,
+        monitorCliCommand: monitorState.cliCommand
+    };
+    Object.keys(map).forEach(function(id) {
+        var el = document.getElementById(id);
+        if (el) el.value = map[id];
+    });
+    var aiGodEl = document.getElementById('monitorAiGod');
+    if (aiGodEl) aiGodEl.checked = !!monitorState.aiGod;
+    var wpAiGod = document.getElementById('wpAiGodToggle');
+    if (wpAiGod) wpAiGod.checked = !!monitorState.aiGod;
+    var thoughtEl = document.getElementById('monitorShowThought');
+    if (thoughtEl) thoughtEl.checked = !!monitorState.showThoughtInMonitor;
+    var sec = document.getElementById('monitorGodConfig');
+    if (sec) sec.style.display = monitorState.aiGod ? 'block' : 'none';
+    var wpSec = document.getElementById('wpAiGodConfig');
+    if (wpSec) wpSec.style.display = monitorState.aiGod ? 'block' : 'none';
+    monitorRenderGodCatSelectors();
+    monitorApplyThoughtVisibility();
+}
+
+function loadCatsFromBackendEnvProfile() {
+    monitorHttp('/api/frontend/profile', { timeoutMs: 12000 }).then(function(profile) {
+        if (!profile || !Array.isArray(profile.cats) || profile.cats.length === 0) {
+            return;
+        }
+        cats = normalizeImportedCats(profile.cats, 0);
+        applyMonitorConfigFromProfile(profile.monitor_config || {});
+        renderMembers();
+        updateOnlineCount();
+        monitorSyncPlayerCountFromCats();
+        if (gameMode === 'pipeline') pipelineUpdateRoleAssign();
+        if (gameMode === 'debate') debateUpdateOrder();
+        addSystemMessage('🧩 已从后端环境变量加载 ' + cats.length + ' 只猫猫配置');
+        showToast('✅ 已自动加载后端配置');
+        var statusEl = document.getElementById('envSaveStatus');
+        if (statusEl) {
+            var ts = profile && profile.saved_at ? profile.saved_at : null;
+            var d = ts ? new Date(ts) : new Date();
+            statusEl.innerText = '后端已保存于 ' + d.getHours().toString().padStart(2, '0') + ':' + d.getMinutes().toString().padStart(2, '0') + ':' + d.getSeconds().toString().padStart(2, '0');
+            statusEl.style.color = 'rgba(255,255,255,0.5)';
+        }
+    }).catch(function(err) {
+        console.warn('load frontend profile failed', err);
+    });
+}
+
+function monitorReloadEnvProfile() {
+    loadCatsFromBackendEnvProfile();
+    monitorAddPhaseLog('已请求从后端环境变量重载猫猫配置');
 }
 
 function monitorSyncPlayerCountFromCats() {
     var select = document.getElementById('monitorPlayerCount');
     if (!select) return;
-    var n = cats.length;
+    var n = monitorPlayableCats().length;
     if (n < 8) n = 8;
     if (n > 12) n = 12;
     monitorState.playerCount = n;
@@ -609,8 +1330,7 @@ function switchMode(mode) {
         jt.classList.add('active');
         document.getElementById('chatTitle').textContent = '🐺 猫猫大厅 · 狼人杀模式';
         document.getElementById('messageInput').placeholder = '以法官身份发言...';
-        addSystemMessage('🐺 已切换到狼人杀模式！铲屎官将担任法官。');
-        werewolfRefreshLinkButton();
+        addSystemMessage('🐺 已切换到狼人杀模式！默认后端联动，铲屎官将担任法官。');
         werewolfSyncButtonsByState();
     } else if (mode === 'pipeline') {
         dp.classList.remove('active');
@@ -642,6 +1362,7 @@ function switchMode(mode) {
         document.getElementById('messageInput').placeholder = '说点什么吧，猫猫们在等你喵～';
         addSystemMessage('💬 已切换到讨论模式，大家畅所欲言吧！');
     }
+    monitorApplyThoughtVisibility();
 }
 function toggleJudgeView() {
     judgeView = !judgeView;
@@ -651,53 +1372,33 @@ function toggleJudgeView() {
 
 // ====================== Werewolf ======================
 function werewolfStart() {
-    if (wfState.backendLinked) {
-        var startBtn = document.getElementById('wpStartBtn');
-        if (startBtn) startBtn.disabled = true;
-        monitorRenderGlobal('联动启动中：建房/注册/开局...');
-        monitorAddPhaseLog('联动启动中：建房/注册/开局...');
-        monitorEnsureAiRoomFromCats().then(function(roomData) {
-            var roomId = roomData.room_id;
-            if (!monitorState.isConnected || monitorState.roomId !== roomId) {
-                monitorConnectWs();
-            }
-            return monitorRegisterAgentsFromFrontendCats().then(function() {
-                return monitorStartGame();
-            }).then(function() {
-                setTimeout(function() {
-                    monitorHttp('/api/rooms/' + encodeURIComponent(roomId)).then(function(state) {
-                        monitorApplyRoomState(state);
-                    }).catch(function() {});
-                }, 500);
-                addSystemMessage('🚀 已按前端猫猫配置启动后端狼人杀：' + roomId, 'night-msg');
-            });
-        }).catch(function(err) {
-            showToast('❌ 联动启动失败：' + err.message);
-            monitorAddPhaseLog('联动启动失败：' + err.message);
-        }).finally(function() {
-            if (startBtn) startBtn.disabled = false;
+    var startBtn = document.getElementById('wpStartBtn');
+    if (startBtn) startBtn.disabled = true;
+    monitorState.narrationSeenKeys = {};
+    monitorState.pendingPhaseChangedPayload = null;
+    monitorState.lastStateOrder = -1;
+    monitorRenderGlobal('联动启动中：后端编排/开局...');
+    monitorAddPhaseLog('联动启动中：后端编排/开局...');
+    monitorRegisterAgentsFromFrontendCats().then(function() {
+        var roomId = monitorState.roomId;
+        wfState.linkedRoomId = roomId;
+        addSystemMessage('🚀 已启动后端联动狼人杀：' + roomId, 'night-msg');
+        if (!monitorState.isConnected || monitorState.roomId !== roomId) {
+            monitorConnectWs();
+        }
+        return monitorStartGame().then(function() {
+            werewolfStartAutoAdvance();
+            setTimeout(function() {
+                monitorHttp('/api/rooms/' + encodeURIComponent(roomId)).then(function(state) {
+                    monitorApplyRoomState(state);
+                }).catch(function() {});
+            }, 500);
         });
-        return;
-    }
-    if (cats.length < 4) { showToast('⚠️ 至少需要 4 只猫猫才能开始！'); return; }
-    var pool = buildRolePool(cats.length);
-    var shuffled = cats.slice().sort(function() { return Math.random() - 0.5; });
-    wfState = { active:true, phase:'night', round:1, roles:{}, eliminated:[], phaseMessages:[] };
-    shuffled.forEach(function(c, i) { wfState.roles[c.id] = pool[i]; });
-    document.getElementById('wpStartBtn').disabled = true;
-    document.getElementById('wpNextBtn').disabled = false;
-    document.getElementById('wpRevealBtn').disabled = false;
-    document.getElementById('wpEndBtn').disabled = false;
-    renderMembers();
-    updateWerewolfStatus();
-    addSystemMessage('🎮 狼人杀开始！角色已秘密分配。', 'night-msg');
-    addSystemMessage('🌙 第 ' + wfState.round + ' 轮 · 夜晚 — 天黑请闭眼...', 'night-msg');
-    cats.forEach(function(cat) {
-        var role = wfState.roles[cat.id];
-        if (!role) return;
-        var sys = buildWerewolfSystemPrompt(cat, role);
-        var intro = [{ role:'user', content:'[法官]: 游戏开始！你的身份是【' + role.name + ' ' + role.icon + '】。' + role.desc + '。现在是第一个夜晚，请简短回复法官（不暴露身份，20字以内）。' }];
-        triggerCatResponse(cat, { system:sys, messages:intro }, true);
+    }).catch(function(err) {
+        showToast('❌ 联动启动失败：' + err.message);
+        monitorAddPhaseLog('联动启动失败：' + err.message);
+    }).finally(function() {
+        if (startBtn) startBtn.disabled = false;
     });
 }
 function buildRolePool(n) {
@@ -714,33 +1415,9 @@ function buildWerewolfSystemPrompt(cat, role) {
     var vis = wfState.phase === 'night' ? '现在是夜晚，你的发言只有法官能看到。' : '现在是白天，所有人都能看到你的发言。';
     return cat.personality + '\n\n【狼人杀】\n角色：' + role.name + '（' + role.icon + '）\n' + role.desc + '\n' + team + '\n\n【规则】\n- 保持猫咪口吻\n- ' + vis + '\n- 不要直接暴露身份\n- 回复简短（30-80字）\n- 可以撒谎、伪装、推理';
 }
-function werewolfNextPhase() {
+function werewolfNextPhase(isAuto) {
     if (!wfState.active) return;
-    if (wfState.backendLinked) {
-        monitorAdvance();
-        return;
-    }
-    var ps = ['night','day','vote'];
-    var ci = ps.indexOf(wfState.phase);
-    var np = ps[(ci + 1) % 3];
-    if (np === 'night') wfState.round++;
-    wfState.phase = np;
-    wfState.phaseMessages = [];
-    var lab = { night:'🌙 夜晚', day:'☀️ 白天', vote:'🗳️ 投票' };
-    var cls = { night:'night-msg', day:'day-msg', vote:'vote-msg' };
-    addSystemMessage(lab[np] + ' — 第 ' + wfState.round + ' 轮', cls[np]);
-    updateWerewolfStatus();
-    if (np === 'night') {
-        addSystemMessage('天黑请闭眼...猫猫的发言只有法官可见。', 'night-msg');
-        promptCatsForPhase('现在天黑了。请根据你的角色做出夜晚行动（如无夜晚能力则安静等待）。简短回复（20字以内）。');
-    } else if (np === 'day') {
-        addSystemMessage('天亮了！请讨论谁是狼人。', 'day-msg');
-        promptCatsForPhase('天亮了！请分析局势，说说你的看法（50-100字）。');
-    } else {
-        addSystemMessage('投票时间！', 'vote-msg');
-        var alive = cats.filter(function(c) { return !wfState.eliminated.includes(c.id); }).map(function(c) { return c.name; }).join('、');
-        promptCatsForPhase('投票环节。存活玩家：' + alive + '。请投出最可疑的玩家并说明理由（30字以内）。格式：【投票：名字】理由');
-    }
+    monitorAdvance({ auto: !!isAuto }).catch(function() {});
 }
 function promptCatsForPhase(prompt) {
     var alive = cats.filter(function(c) { return !wfState.eliminated.includes(c.id); });
@@ -753,39 +1430,16 @@ function promptCatsForPhase(prompt) {
     });
 }
 function werewolfRevealAll() {
-    if (wfState.backendLinked) {
-        showToast('ℹ️ 联动模式下角色由后端控制，前端不支持公开角色。');
-        return;
-    }
-    if (!wfState.active) return;
-    var info = '📋 角色揭示：\n';
-    cats.forEach(function(c) {
-        var r = wfState.roles[c.id];
-        var s = wfState.eliminated.includes(c.id) ? '💀' : '✅';
-        info += s + ' ' + c.emoji + ' ' + c.name + ' → ' + r.icon + ' ' + r.name + '\n';
-    });
-    addSystemMessage(info);
+    showToast('ℹ️ 默认后端联动模式下不支持前端公开角色。');
 }
 function werewolfEnd() {
-    if (wfState.backendLinked) {
-        wfState.active = false;
-        wfState.phase = 'idle';
-        wfState.eliminated = [];
-        document.getElementById('wpStatus').style.display = 'none';
-        werewolfSyncButtonsByState();
-        addSystemMessage('⏹ 已结束本地联动视图（后端房间仍可在监控模式继续观察）。');
-        return;
-    }
+    werewolfStopAutoAdvance();
     wfState.active = false;
     wfState.phase = 'idle';
-    document.getElementById('wpStartBtn').disabled = false;
-    document.getElementById('wpNextBtn').disabled = true;
-    document.getElementById('wpRevealBtn').disabled = true;
-    document.getElementById('wpEndBtn').disabled = true;
+    wfState.eliminated = [];
     document.getElementById('wpStatus').style.display = 'none';
-    wfState.roles = {};
-    renderMembers();
-    addSystemMessage('🎮 狼人杀游戏已结束！');
+    werewolfSyncButtonsByState();
+    addSystemMessage('⏹ 已结束本地联动视图（后端房间仍可在监控模式继续观察）。');
 }
 function updateWerewolfStatus() {
     var el = document.getElementById('wpStatus');
@@ -813,10 +1467,16 @@ function updateWerewolfStatus() {
 }
 function refreshWerewolfVisibility() {
     document.querySelectorAll('.wf-msg').forEach(function(el) {
+        var isNightMsg = el.dataset.wfNight === 'true';
         if (judgeView) {
             el.classList.remove('message-hidden');
         } else if (el.dataset.wfHidden === 'true') {
             el.classList.add('message-hidden');
+        }
+        if (werewolfShouldHideNightRoleBadge(isNightMsg)) {
+            el.classList.add('role-hidden');
+        } else {
+            el.classList.remove('role-hidden');
         }
     });
 }
@@ -1269,6 +1929,9 @@ function addCat() {
     showToast('🐱 ' + cat.name + ' 已加入！');
     if (gameMode === 'pipeline') pipelineUpdateRoleAssign();
     if (gameMode === 'debate') debateUpdateOrder();
+    monitorCollectInvokeConfig();
+    monitorPersistConfig();
+    persistCatsToBackendEnv('新增猫猫');
     var intro = buildApiMessages(cat, [{ role:'user', name:'铲屎官', content:'你刚加入聊天室，请简短做一个可爱的自我介绍（不超过50字）。' }], true);
     triggerCatResponse(cat, intro, false);
 }
@@ -1285,44 +1948,100 @@ function removeCat(catId) {
         dbState.order = dbState.order.filter(function(id) { return id !== catId; });
         debateUpdateOrder();
     }
+    monitorCollectInvokeConfig();
+    monitorPersistConfig();
+    persistCatsToBackendEnv('删除猫猫');
 }
 
 // ====================== Members ======================
 function renderMembers() {
+    ttsEnsureSpeakerAssignments();
+    monitorRenderGodCatSelectors();
     var list = document.getElementById('membersList');
     var judgeRole = (gameMode === 'werewolf') ? ' <span class="role-badge" style="background:#f39c12;color:white;">⚖️ 法官</span>' : '';
     var html = '<div class="member-card"><div class="member-avatar" style="background:linear-gradient(135deg,#ffd803,#ff8c42);">🧑</div><div class="member-status"></div><div class="member-info"><div class="member-name">铲屎官</div><div class="member-role">主人 · 在线' + judgeRole + '</div></div></div>';
     cats.forEach(function(cat) {
+        var isOnline = catOnlineState(cat);
+        var statusClass = isOnline ? '' : ' offline';
+        var statusText = isOnline ? '在线' : '离线';
         var roleHtml = '';
         if (wfState.active && wfState.roles[cat.id]) {
             var r = wfState.roles[cat.id];
             var dead = wfState.eliminated.includes(cat.id);
             roleHtml = ' <span class="role-badge ' + r.id + '">' + r.icon + ' ' + r.name + '</span>';
-            if (dead) roleHtml += ' <span style="color:#e74c3c;font-size:11px;">💀 已淘汰</span>';
+            if (dead) {
+                var deadCause = wfState.eliminatedCauseByCatId ? wfState.eliminatedCauseByCatId[cat.id] : '';
+                var deadLabel = werewolfEliminatedCauseLabel(deadCause);
+                roleHtml += ' <span style="color:#e74c3c;font-size:11px;">💀 已淘汰（' + escapeHtml(deadLabel) + '）</span>';
+            }
+        }
+        if (monitorState.aiGod && monitorState.godCatId && monitorState.godCatId === cat.id) {
+            roleHtml += ' <span class="role-badge" style="background:#ff6b6b;color:white;">🤖 AI法官</span>';
         }
         if (plState.active && plState.roles) {
             if (plState.roles.developer && plState.roles.developer.id === cat.id) roleHtml = ' <span class="pp-role-tag pp-role-dev">🛠️ 开发</span>';
             if (plState.roles.reviewer && plState.roles.reviewer.id === cat.id) roleHtml = ' <span class="pp-role-tag pp-role-review">🔍 检视</span>';
             if (plState.roles.tester && plState.roles.tester.id === cat.id) roleHtml = ' <span class="pp-role-tag pp-role-test">🧪 测试</span>';
         }
-        html += '<div class="member-card"><div class="member-avatar" style="background:linear-gradient(135deg,' + cat.color + ',' + adjustColor(cat.color, -20) + ');" onmouseenter="showCatTooltip(\'' + cat.id + '\',event)" onmouseleave="hideCatTooltip()">' + catAvatarHtml(cat) + '</div><div class="member-status"></div><div class="member-info"><div class="member-name">' + escapeHtml(cat.name) + '</div><div class="member-role"><span class="provider-badge ' + cat.badgeClass + '">' + PROVIDERS[cat.provider].icon + ' ' + cat.model + '</span> <span style="font-size:11px;color:rgba(0,0,0,0.45);">' + escapeHtml(cat.breed || '家猫') + '</span>' + roleHtml + '</div></div><button class="member-remove" onclick="removeCat(\'' + cat.id + '\')" title="移除">✕</button></div>';
+        html += '<div class="member-card"><div class="member-avatar" style="background:linear-gradient(135deg,' + cat.color + ',' + adjustColor(cat.color, -20) + ');" onmouseenter="showCatTooltip(\'' + cat.id + '\',event)" onmouseleave="hideCatTooltip()">' + catAvatarHtml(cat) + '</div><div class="member-status' + statusClass + '"></div><div class="member-info"><div class="member-name">' + escapeHtml(cat.name) + '</div><div class="member-role"><span class="provider-badge ' + cat.badgeClass + '">' + PROVIDERS[cat.provider].icon + ' ' + cat.model + '</span> <span style="font-size:11px;color:rgba(0,0,0,0.45);">' + escapeHtml(cat.breed || '家猫') + '</span> <span style="font-size:11px;color:' + (isOnline ? '#10b981' : '#9ca3af') + ';">' + statusText + '</span>' + roleHtml + '</div></div><button class="member-remove" onclick="removeCat(\'' + cat.id + '\')" title="移除">✕</button></div>';
     });
     list.innerHTML = html;
 }
 function updateOnlineCount() {
-    document.getElementById('onlineCount').textContent = '1 位铲屎官 · ' + cats.length + ' 只猫猫在线';
+    var onlineCats = cats.filter(function(cat) { return catOnlineState(cat); }).length;
+    document.getElementById('onlineCount').textContent = '1 位铲屎官 · ' + onlineCats + '/' + cats.length + ' 只猫猫在线';
     var mc = document.getElementById('memberCount');
     if (mc) mc.textContent = cats.length;
 }
 
+function catOnlineState(cat) {
+    if (!cat) return true;
+    if (monitorState && monitorState.catOnlineById && monitorState.catOnlineById.hasOwnProperty(cat.id)) {
+        return !!monitorState.catOnlineById[cat.id];
+    }
+    return true;
+}
+
+function monitorSetAllCatsOnline(online) {
+    var next = {};
+    cats.forEach(function(cat) {
+        next[cat.id] = !!online;
+    });
+    monitorState.catOnlineById = next;
+}
+
+function monitorApplyBootstrapRegistrationResult(data) {
+    var boot = (data && data.bootstrap) || {};
+    var reg = (boot && boot.registered_agents) || {};
+    var agents = reg.agents || {};
+    var next = {};
+    (monitorState.players || []).forEach(function(pid) {
+        var bind = monitorState.playerBindings[pid] || {};
+        var catId = bind.catId;
+        if (!catId) return;
+        next[catId] = !!agents[pid];
+    });
+    if (!Object.keys(next).length && cats.length > 0) {
+        monitorSetAllCatsOnline(false);
+        return;
+    }
+    monitorState.catOnlineById = next;
+}
+
 // ====================== Messages ======================
-function addSystemMessage(text, cls) {
+function addSystemMessage(text, cls, options) {
     hideEmptyState();
     var d = document.createElement('div');
     d.className = 'message system-message ' + (cls || '');
     d.textContent = text;
     document.getElementById('chatMessages').appendChild(d);
     scrollToBottom();
+
+    var opts = options || {};
+    var speaker = opts.speaker || ttsInferSystemSpeaker(text, cls);
+    if (speaker && speaker.key) {
+        ttsSpeak(speaker.key, speaker.name || '法官', text);
+    }
 }
 function addUserMessage(text) {
     hideEmptyState();
@@ -1336,6 +2055,7 @@ function addUserMessage(text) {
 function addCatMessage(cat, text, isNight) {
     var d = document.createElement('div');
     d.className = 'message cat-message wf-msg';
+    d.dataset.wfNight = isNight ? 'true' : 'false';
     if (isNight) d.classList.add('message-night');
     if (gameMode === 'werewolf' && isNight) {
         d.dataset.wfHidden = 'true';
@@ -1343,9 +2063,29 @@ function addCatMessage(cat, text, isNight) {
     }
     var displayText = d.classList.contains('message-hidden') ? '🔒 [发言已隐藏]' : escapeHtml(text);
     var nightLabel = isNight ? ' 🌙' : '';
-    d.innerHTML = '<div class="message-avatar" style="background:linear-gradient(135deg,' + cat.color + ',' + adjustColor(cat.color, -20) + ');" onmouseenter="showCatTooltip(\'' + cat.id + '\',event)" onmouseleave="hideCatTooltip()">' + catAvatarHtml(cat) + '</div><div class="message-content"><div class="message-sender">' + escapeHtml(cat.name) + nightLabel + '</div><div class="message-bubble" data-real="' + escapeHtml(text) + '">' + displayText + '</div><div class="message-time">' + getTimeStr() + '</div></div>';
+    var senderRole = null;
+    if (gameMode === 'werewolf') {
+        if (cat.role) {
+            senderRole = cat.role;
+        } else if (wfState.roles && wfState.roles[cat.id]) {
+            senderRole = wfState.roles[cat.id];
+        }
+    }
+    var senderRoleHtml = '';
+    if (senderRole && senderRole.name) {
+        var senderRoleIcon = senderRole.icon || '🎭';
+        var senderRoleClass = (senderRole.id || '').replace(/[^a-z0-9_-]/ig, '');
+        senderRoleHtml = ' <span class="role-badge sender-role-badge ' + senderRoleClass + '">' + escapeHtml(senderRoleIcon) + ' ' + escapeHtml(senderRole.name) + '</span>';
+    }
+    d.innerHTML = '<div class="message-avatar" style="background:linear-gradient(135deg,' + cat.color + ',' + adjustColor(cat.color, -20) + ');" onmouseenter="showCatTooltip(\'' + cat.id + '\',event)" onmouseleave="hideCatTooltip()">' + catAvatarHtml(cat) + '</div><div class="message-content"><div class="message-sender">' + escapeHtml(cat.name) + nightLabel + senderRoleHtml + '</div><div class="message-bubble" data-real="' + escapeHtml(text) + '">' + displayText + '</div><div class="message-time">' + getTimeStr() + '</div></div>';
     document.getElementById('chatMessages').appendChild(d);
+    if (werewolfShouldHideNightRoleBadge(isNight)) {
+        d.classList.add('role-hidden');
+    }
     scrollToBottom();
+    if (!d.classList.contains('message-hidden')) {
+        ttsSpeak(cat.id, cat.name, text);
+    }
 }
 function addThinkingIndicator(cat) {
     var d = document.createElement('div');
@@ -1711,6 +2451,37 @@ function toggleCliProxy() {
     if (el.style.display === 'none') { el.style.display = 'block'; arrow.textContent = '▼'; }
     else { el.style.display = 'none'; arrow.textContent = '▶'; }
 }
+function toggleTtsSettings() {
+    var el = document.getElementById('ttsSettings');
+    var arrow = document.getElementById('ttsArrow');
+    if (el.style.display === 'none') { el.style.display = 'block'; arrow.textContent = '▼'; }
+    else { el.style.display = 'none'; arrow.textContent = '▶'; }
+}
+function onTtsEnabledToggle() {
+    var cb = document.getElementById('ttsEnabled');
+    ttsState.enabled = !!(cb && cb.checked);
+    if (!ttsState.enabled && ttsState.supported) {
+        try { window.speechSynthesis.cancel(); } catch (_) {}
+    }
+    ttsSaveSettings();
+    ttsUpdateSettingsUI();
+}
+function onTtsRateInput() {
+    var input = document.getElementById('ttsRate');
+    var v = Number(input && input.value ? input.value : 1);
+    if (!Number.isFinite(v)) v = 1;
+    ttsState.rate = Math.max(0.6, Math.min(1.6, v));
+    ttsSaveSettings();
+    ttsUpdateSettingsUI();
+}
+function onTtsVolumeInput() {
+    var input = document.getElementById('ttsVolume');
+    var v = Number(input && input.value != null ? input.value : 1);
+    if (!Number.isFinite(v)) v = 1;
+    ttsState.volume = Math.max(0, Math.min(1, v));
+    ttsSaveSettings();
+    ttsUpdateSettingsUI();
+}
 function onCliProxyToggle() {
     var cb = document.getElementById('cliProxyEnabled');
     var label = document.getElementById('cliProxyLabel');
@@ -1803,6 +2574,11 @@ function monitorInit() {
     if (aiGodEl) {
         aiGodEl.checked = !!monitorState.aiGod;
         aiGodEl.addEventListener('change', function() {
+            if (wfState.active) {
+                aiGodEl.checked = !!monitorState.aiGod;
+                showToast('⚠️ 游戏已开始，不能再切换 AI 法官模式');
+                return;
+            }
             var show = aiGodEl.checked;
             var sec = document.getElementById('monitorGodConfig');
             if (sec) sec.style.display = show ? 'block' : 'none';
@@ -1824,27 +2600,19 @@ function monitorInit() {
         var wpSec = document.getElementById('wpAiGodConfig');
         if (wpSec) wpSec.style.display = wpGodEl.checked ? 'block' : 'none';
     }
-    // Restore werewolf panel god config fields
-    var wpGodApiUrl = document.getElementById('wpGodApiUrl');
-    var wpGodApiKey = document.getElementById('wpGodApiKey');
-    var wpGodModelName = document.getElementById('wpGodModelName');
-    var wpGodProvider = document.getElementById('wpGodProvider');
-    if (wpGodApiUrl) wpGodApiUrl.value = monitorState.godApiUrl || '';
-    if (wpGodApiKey) wpGodApiKey.value = monitorState.godApiKey || '';
-    if (wpGodModelName) wpGodModelName.value = monitorState.godModelName || '';
-    if (wpGodProvider) wpGodProvider.value = monitorState.godProvider || 'openai';
-    var godApiUrlEl = document.getElementById('monitorGodApiUrl');
-    var godApiKeyEl = document.getElementById('monitorGodApiKey');
-    var godModelNameEl = document.getElementById('monitorGodModelName');
-    var godProviderEl = document.getElementById('monitorGodProvider');
-    var godTempEl = document.getElementById('monitorGodTemperature');
-    if (godApiUrlEl) godApiUrlEl.value = monitorState.godApiUrl || '';
-    if (godApiKeyEl) godApiKeyEl.value = monitorState.godApiKey || '';
-    if (godModelNameEl) godModelNameEl.value = monitorState.godModelName || '';
-    if (godProviderEl) godProviderEl.value = monitorState.godProvider || 'openai';
-    if (godTempEl) godTempEl.value = monitorState.godTemperature != null ? monitorState.godTemperature : 0.7;
+    var wpHideRoleEl = document.getElementById('wpHideNightRole');
+    if (wpHideRoleEl) {
+        wpHideRoleEl.checked = !!wfState.hideNightRoleForAudience;
+    }
+    var monitorThoughtEl = document.getElementById('monitorShowThought');
+    if (monitorThoughtEl) {
+        monitorThoughtEl.checked = !!monitorState.showThoughtInMonitor;
+    }
+    monitorRenderGodCatSelectors();
+    monitorLockGodConfigIfStarted();
     monitorBindConfigPersistence();
     monitorRenderGlobal('未连接');
+    monitorApplyThoughtVisibility();
 }
 
 function monitorLoadPersistedConfig() {
@@ -1862,11 +2630,14 @@ function monitorLoadPersistedConfig() {
         monitorState.modelName = saved.modelName || '';
         monitorState.cliCommand = saved.cliCommand || '';
         monitorState.aiGod = !!saved.aiGod;
-        monitorState.godApiUrl = saved.godApiUrl || '';
-        monitorState.godApiKey = saved.godApiKey || '';
-        monitorState.godModelName = saved.godModelName || '';
-        monitorState.godProvider = saved.godProvider || 'openai';
-        monitorState.godTemperature = saved.godTemperature != null ? saved.godTemperature : 0.7;
+        monitorState.godCatId = saved.godCatId || '';
+        if (typeof saved.hideNightRoleForAudience === 'boolean') {
+            monitorState.hideNightRoleForAudience = saved.hideNightRoleForAudience;
+            wfState.hideNightRoleForAudience = saved.hideNightRoleForAudience;
+        }
+        if (typeof saved.showThoughtInMonitor === 'boolean') {
+            monitorState.showThoughtInMonitor = saved.showThoughtInMonitor;
+        }
     } catch (e) {
         console.warn('monitor config load failed', e);
     }
@@ -1884,11 +2655,9 @@ function monitorPersistConfig() {
             modelName: monitorState.modelName,
             cliCommand: monitorState.cliCommand,
             aiGod: monitorState.aiGod || false,
-            godApiUrl: monitorState.godApiUrl || '',
-            godApiKey: monitorState.godApiKey || '',
-            godModelName: monitorState.godModelName || '',
-            godProvider: monitorState.godProvider || 'openai',
-            godTemperature: monitorState.godTemperature != null ? monitorState.godTemperature : 0.7
+            godCatId: monitorState.godCatId || '',
+            hideNightRoleForAudience: !!wfState.hideNightRoleForAudience,
+            showThoughtInMonitor: !!monitorState.showThoughtInMonitor
         };
         localStorage.setItem(MONITOR_CONFIG_STORAGE_KEY, JSON.stringify(payload));
     } catch (e) {
@@ -1907,11 +2676,10 @@ function monitorBindConfigPersistence() {
         'monitorModelName',
         'monitorCliCommand',
         'monitorAiGod',
-        'monitorGodApiUrl',
-        'monitorGodApiKey',
-        'monitorGodModelName',
-        'monitorGodProvider',
-        'monitorGodTemperature'
+        'monitorShowThought',
+        'monitorGodCatId',
+        'wpGodCatId',
+        'wpHideNightRole'
     ];
     ids.forEach(function(id) {
         var el = document.getElementById(id);
@@ -1939,18 +2707,10 @@ function monitorCollectInvokeConfig() {
     var aiGodEl = document.getElementById('monitorAiGod');
     var wpAiGodEl = document.getElementById('wpAiGodToggle');
     var aiGod = (aiGodEl && aiGodEl.checked) || (wpAiGodEl && wpAiGodEl.checked) || false;
-    var godApiUrl = (document.getElementById('monitorGodApiUrl') && document.getElementById('monitorGodApiUrl').value || '').trim()
-        || (document.getElementById('wpGodApiUrl') && document.getElementById('wpGodApiUrl').value || '').trim();
-    var godApiKey = (document.getElementById('monitorGodApiKey') && document.getElementById('monitorGodApiKey').value || '').trim()
-        || (document.getElementById('wpGodApiKey') && document.getElementById('wpGodApiKey').value || '').trim();
-    var godModelName = (document.getElementById('monitorGodModelName') && document.getElementById('monitorGodModelName').value || '').trim()
-        || (document.getElementById('wpGodModelName') && document.getElementById('wpGodModelName').value || '').trim();
-    var godProvider = (document.getElementById('monitorGodProvider') && document.getElementById('monitorGodProvider').value || '')
-        || (document.getElementById('wpGodProvider') && document.getElementById('wpGodProvider').value || '')
-        || 'openai';
-    var godTempEl = document.getElementById('monitorGodTemperature');
-    var godTemperature = godTempEl ? parseFloat(godTempEl.value) : 0.7;
-    if (isNaN(godTemperature)) godTemperature = 0.7;
+    var godCatId = (document.getElementById('monitorGodCatId') && document.getElementById('monitorGodCatId').value || '').trim()
+        || (document.getElementById('wpGodCatId') && document.getElementById('wpGodCatId').value || '').trim()
+        || monitorState.godCatId
+        || (cats[0] ? cats[0].id : '');
 
     monitorState.agentHost = host;
     monitorState.agentStartPort = startPort;
@@ -1959,11 +2719,13 @@ function monitorCollectInvokeConfig() {
     monitorState.modelName = modelName;
     monitorState.cliCommand = cliCommand;
     monitorState.aiGod = aiGod;
-    monitorState.godApiUrl = godApiUrl;
-    monitorState.godApiKey = godApiKey;
-    monitorState.godModelName = godModelName;
-    monitorState.godProvider = godProvider;
-    monitorState.godTemperature = godTemperature;
+    monitorState.godCatId = godCatId;
+    var thoughtEl = document.getElementById('monitorShowThought');
+    monitorState.showThoughtInMonitor = !(thoughtEl && thoughtEl.checked === false);
+    var hideRoleEl = document.getElementById('wpHideNightRole');
+    var hideNightRole = !(hideRoleEl && hideRoleEl.checked === false);
+    wfState.hideNightRoleForAudience = hideNightRole;
+    monitorState.hideNightRoleForAudience = hideNightRole;
     monitorPersistConfig();
 
     return {
@@ -1974,20 +2736,17 @@ function monitorCollectInvokeConfig() {
         modelName: modelName,
         cliCommand: cliCommand,
         aiGod: aiGod,
-        godApiUrl: godApiUrl || apiUrl,
-        godApiKey: godApiKey || apiKey,
-        godModelName: godModelName || modelName,
-        godProvider: godProvider,
-        godTemperature: godTemperature
+        godCatId: godCatId
     };
 }
 
 function monitorRegisterAgents() {
-    monitorEnsureAiRoomFromCats().then(function() {
-        return monitorRegisterAgentsFromFrontendCats();
-    }).then(function(results) {
-        showToast('✅ Agent注册完成：' + results.length + '只猫猫');
+    monitorRegisterAgentsFromFrontendCats().then(function(results) {
+        showToast('✅ Agent注册完成：' + Object.keys(results || {}).length + '只猫猫');
     }).catch(function(err) {
+        monitorSetAllCatsOnline(false);
+        renderMembers();
+        updateOnlineCount();
         showToast('❌ Agent注册失败：' + err.message);
         monitorAddPhaseLog('Agent注册失败：' + err.message);
     });
@@ -2023,20 +2782,36 @@ function monitorHttp(path, options) {
 }
 
 function monitorCreateRoom() {
-    monitorEnsureAiRoomFromCats().then(function(data) {
+    monitorHttp('/api/ai/bootstrap-from-env', {
+        timeoutMs: 86400000,
+        method: 'POST',
+        body: JSON.stringify({})
+    }).then(function(data) {
         monitorState.speechSeenKeys = {};
         monitorState.speechRenderedKeys = {};
         monitorState.narrationSeenKeys = {};
+        monitorState.lastStateOrder = -1;
         monitorState.speechTimeline = [];
         monitorState.roomId = data.room_id;
         monitorState.ownerId = data.owner_id || 'cat_01';
         monitorState.players = data.players || [];
+        monitorState.aiGod = !!data.ai_god;
+        if (data.god_cat_id) monitorState.godCatId = data.god_cat_id;
+        wfState.linkedRoomId = monitorState.roomId;
+        monitorState.playerBindings = monitorBuildBindingMap(monitorState.players);
+        monitorApplyBootstrapRegistrationResult(data);
         document.getElementById('monitorRoomId').value = monitorState.roomId;
         monitorSyncViewOptions();
-        monitorRenderGlobal('房间已创建：' + monitorState.roomId + '（按前端猫猫 ' + cats.length + ' 人）');
-        addSystemMessage('🛰️ 监控房间创建成功：' + monitorState.roomId + '（来源：前端猫猫配置）', 'pipeline-msg');
-        showToast('✅ AI 房间已创建');
+        renderMembers();
+        updateOnlineCount();
+        var judgeMode = monitorJudgeModeLabel(data);
+        monitorRenderGlobal('后端已完成建房与拉起：' + monitorState.roomId + '（' + (data.player_count || monitorState.players.length) + '人） · ' + judgeMode);
+        addSystemMessage('🛰️ 后端已完成建房+拉起+注册：' + monitorState.roomId + '（来源：环境变量，' + judgeMode + '）', 'pipeline-msg');
+        showToast('✅ 后端拉起成功');
     }).catch(function(err) {
+        monitorSetAllCatsOnline(false);
+        renderMembers();
+        updateOnlineCount();
         showToast('❌ 创建房间失败：' + err.message);
         monitorRenderGlobal('创建失败：' + err.message);
     });
@@ -2118,7 +2893,7 @@ function monitorHandleWsEvent(msg) {
         if (payload.god_view && monitorState.viewMode === 'god') {
             monitorAddPhaseLog('🐺 狼队目标: ' + JSON.stringify(payload.god_view));
         }
-        monitorNarrateFromPhaseChanged(payload);
+        monitorState.pendingPhaseChangedPayload = payload;
         var roomId = monitorRoomId();
         if (roomId) {
             monitorHttp('/api/rooms/' + encodeURIComponent(roomId)).then(function(state) {
@@ -2134,15 +2909,50 @@ function monitorHandleWsEvent(msg) {
 }
 
 function monitorApplyRoomState(state) {
+    var stateOrder = monitorStateOrderValue(state);
+    if (stateOrder < (monitorState.lastStateOrder || -1)) {
+        return;
+    }
+    monitorState.lastStateOrder = stateOrder;
+
     monitorState.roomId = state.room_id || monitorState.roomId;
     if (state.owner_id) monitorState.ownerId = state.owner_id;
     var rid = document.getElementById('monitorRoomId');
     if (rid && monitorState.roomId) rid.value = monitorState.roomId;
     var players = state.players || [];
+    var playableCats = monitorPlayableCats();
     monitorState.players = players.map(function(p) { return p.player_id; });
     var map = {};
-    players.forEach(function(p) {
+    players.forEach(function(p, idx) {
         var bound = monitorState.playerBindings[p.player_id] || {};
+        if (!bound.catId && p && p.nickname) {
+            var foundByName = cats.find(function(cat) { return (cat.name || '').trim() === (p.nickname || '').trim(); });
+            if (foundByName) {
+                bound = {
+                    catId: foundByName.id,
+                    nickname: foundByName.name,
+                    breed: foundByName.breed,
+                    color: foundByName.color,
+                    emoji: foundByName.emoji,
+                    avatarUrl: foundByName.avatarUrl || ''
+                };
+                monitorState.playerBindings[p.player_id] = bound;
+            }
+        }
+        if (!bound.catId) {
+            var catByIndex = playableCats[idx];
+            if (catByIndex) {
+                bound = {
+                    catId: catByIndex.id,
+                    nickname: catByIndex.name,
+                    breed: catByIndex.breed,
+                    color: catByIndex.color,
+                    emoji: catByIndex.emoji,
+                    avatarUrl: catByIndex.avatarUrl || ''
+                };
+                monitorState.playerBindings[p.player_id] = bound;
+            }
+        }
         map[p.player_id] = {
             nickname: bound.nickname || p.nickname || p.player_id,
             breed: bound.breed || '',
@@ -2150,6 +2960,9 @@ function monitorApplyRoomState(state) {
             alive: !!p.alive,
             online: !!p.online
         };
+        if (bound.catId) {
+            monitorState.catOnlineById[bound.catId] = !!p.online;
+        }
     });
     monitorState.playerMap = map;
     monitorSyncViewOptions();
@@ -2157,15 +2970,17 @@ function monitorApplyRoomState(state) {
     var total = players.length;
     monitorRenderGlobal('phase=' + state.phase + ' · round=' + (state.round_no || 0) + ' · alive=' + alive + '/' + total + ' · game_over=' + (!!state.game_over));
     monitorRenderGodBoard(state);
-    monitorNarrateFromRoomState(state);
+    renderMembers();
+    updateOnlineCount();
     if (Array.isArray(state.speech_history)) {
-        state.speech_history.forEach(function(s) {
+        monitorSortSpeechHistory(state.speech_history).forEach(function(s) {
             var key = [
                 s.timestamp || '',
                 s.player_id || '',
                 s.phase || '',
                 s.role || '',
-                s.content || ''
+                s.content || '',
+                s.thought_content || ''
             ].join('|');
             if (!monitorState.speechSeenKeys[key]) {
                 monitorState.speechSeenKeys[key] = true;
@@ -2181,7 +2996,14 @@ function monitorApplyRoomState(state) {
         }
         monitorRenderSpeech();
     }
+    monitorNarrateFromRoomState(state);
+    var pendingPhase = monitorState.pendingPhaseChangedPayload;
+    if (pendingPhase && (!pendingPhase.phase || pendingPhase.phase === state.phase)) {
+        monitorNarrateFromPhaseChanged(pendingPhase);
+        monitorState.pendingPhaseChangedPayload = null;
+    }
     werewolfSyncFromBackendState(state);
+    monitorLockGodConfigIfStarted();
 }
 
 function monitorApplyAgentStatusPayload(payload) {
@@ -2209,6 +3031,7 @@ function monitorStartGame() {
         timeoutMs: 15000,
         method: 'POST'
     }).then(function(data) {
+        wfState.active = true;
         monitorRenderGlobal('游戏已启动 · phase=' + data.phase);
         monitorHttp('/api/rooms/' + encodeURIComponent(roomId), { timeoutMs: 10000 }).then(function(state) {
             monitorApplyRoomState(state);
@@ -2216,17 +3039,21 @@ function monitorStartGame() {
         }).catch(function(err) {
             monitorAddPhaseLog('开局后拉取状态失败：' + err.message);
         });
-        showToast('▶️ 游戏已启动（可手动推进）');
+        showToast('▶️ 游戏已启动（自动推进中）');
     }).catch(function(err) {
         showToast('❌ 启动失败：' + err.message);
         monitorAddPhaseLog('启动失败：' + err.message);
     });
 }
 
-function monitorAdvance() {
+function monitorAdvance(options) {
+    var opts = options || {};
     var roomId = monitorRoomId();
-    if (!roomId) { showToast('⚠️ 请先创建房间'); return; }
-    monitorHttp('/api/ai/rooms/' + encodeURIComponent(roomId) + '/run-phase', {
+    if (!roomId) {
+        if (!opts.auto) showToast('⚠️ 请先创建房间');
+        return Promise.reject(new Error('房间 ID 为空'));
+    }
+    return monitorHttp('/api/ai/rooms/' + encodeURIComponent(roomId) + '/run-phase', {
         timeoutMs: 120000,
         method: 'POST'
     }).then(function(data) {
@@ -2236,9 +3063,21 @@ function monitorAdvance() {
         }
         monitorApplyRoomState(state);
         monitorAddPhaseLog('上帝推进 -> ' + (state.phase || 'unknown'));
+        if (wfState.active && !state.game_over) {
+            werewolfScheduleAutoAdvance();
+        } else {
+            werewolfStopAutoAdvance();
+        }
+        return data;
     }).catch(function(err) {
-        showToast('❌ 推进失败：' + err.message);
+        if (!opts.auto) {
+            showToast('❌ 推进失败：' + err.message);
+        }
         monitorAddPhaseLog('推进失败：' + err.message);
+        if (opts.auto && wfState.active) {
+            werewolfScheduleAutoAdvance(3000);
+        }
+        throw err;
     });
 }
 
@@ -2327,7 +3166,9 @@ function monitorRenderSpeech() {
     var rows = monitorState.speechTimeline.slice(-30).reverse().map(function(s) {
         var phase = s.phase ? ('[' + s.phase + '] ') : '';
         var fallback = s.is_fallback ? (' (fallback' + (s.fallback_reason ? ':' + s.fallback_reason : '') + ')') : '';
-        return '<div class="mn-list-item">' + escapeHtml((s.timestamp || '').replace('T', ' ').slice(0, 19) + ' ' + phase + (s.player_id || '?') + ': ' + (s.content || '') + fallback) + '</div>';
+        var thought = (s.thought_content || '').trim();
+        var thoughtPart = (thought && monitorState.showThoughtInMonitor) ? (' | 思考(仅法官): ' + thought) : '';
+        return '<div class="mn-list-item">' + escapeHtml((s.timestamp || '').replace('T', ' ').slice(0, 19) + ' ' + phase + (s.player_id || '?') + ': ' + (s.content || '') + thoughtPart + fallback) + '</div>';
     });
     el.innerHTML = rows.join('') || '<div class="mn-list-item">暂无</div>';
 }
@@ -2390,34 +3231,18 @@ function importCatsFile(event) {
                 showToast('❌ 文件格式错误或没有猫猫数据！');
                 return;
             }
-            var count = 0;
-            data.cats.forEach(function(c) {
-                if (!c.name || !c.provider) return;
-                var cfg = PROVIDERS[c.provider];
-                if (!cfg) cfg = PROVIDERS.openai;
-                cats.push({
-                    id: Date.now().toString() + '_' + count,
-                    name: c.name,
-                    emoji: c.emoji || '🐱',
-                    avatarUrl: c.avatarUrl || '',
-                    breed: c.breed || '家猫',
-                    color: c.color || '#f582ae',
-                    personality: c.personality || '',
-                    provider: c.provider,
-                    apiUrl: c.apiUrl || cfg.defaultUrl,
-                    apiKey: c.apiKey || '',
-                    model: c.model || cfg.defaultModel,
-                    claudeVersion: c.claudeVersion || '2023-06-01',
-                    badgeClass: c.badgeClass || cfg.badgeClass
-                });
-                count++;
-            });
+            var imported = normalizeImportedCats(data.cats, cats.length);
+            imported.forEach(function(c) { cats.push(c); });
+            var count = imported.length;
             renderMembers();
             updateOnlineCount();
             if (gameMode === 'pipeline') pipelineUpdateRoleAssign();
             if (gameMode === 'debate') debateUpdateOrder();
             addSystemMessage('📥 已导入 ' + count + ' 只猫猫的配置！');
             showToast('✅ 成功导入 ' + count + ' 只猫猫！');
+            monitorCollectInvokeConfig();
+            monitorPersistConfig();
+            persistCatsToBackendEnv('导入猫猫配置');
         } catch (err) {
             showToast('❌ 解析文件失败：' + err.message);
         }
@@ -2562,12 +3387,16 @@ function saveEditCat() {
     closeEditCatModal();
     showToast('✅ ' + cat.name + ' 的档案已更新！');
     addSystemMessage('✏️ ' + cat.name + ' 的配置已被修改（' + cfg.icon + ' ' + cfg.name + ' · ' + cat.model + '）');
+    monitorCollectInvokeConfig();
+    monitorPersistConfig();
+    persistCatsToBackendEnv('编辑猫猫');
 }
 
 function monitorBuildBindingMap(players) {
     var bindings = {};
+    var playableCats = monitorPlayableCats();
     (players || []).forEach(function(pid, idx) {
-        var cat = cats[idx];
+        var cat = playableCats[idx];
         if (!cat) return;
         bindings[pid] = {
             catId: cat.id,
@@ -2582,11 +3411,15 @@ function monitorBuildBindingMap(players) {
 }
 
 function monitorValidateCatsForBackend(cfg) {
-    if (cats.length < 8 || cats.length > 12) {
-        throw new Error('联动模式要求前端猫猫数量为 8~12，当前为 ' + cats.length);
+    var playableCount = monitorPlayableCats().length;
+    if (cfg.aiGod && cats.length < 9) {
+        throw new Error('启用AI法官时，至少需要 9 只猫猫（含1只法官猫 + 8只参赛猫）');
+    }
+    if (playableCount < 8 || playableCount > 12) {
+        throw new Error('联动模式要求参赛猫猫数量为 8~12，当前为 ' + playableCount);
     }
     if (cfg.cliCommand) return;
-    var missing = cats.filter(function(cat) {
+    var missing = monitorPlayableCats().filter(function(cat) {
         var key = (cat.apiKey || '').trim() || (document.getElementById('globalApiKey').value || '').trim();
         return !key;
     });
@@ -2654,108 +3487,54 @@ function monitorEnsureAiRoomFromCats() {
 }
 
 function monitorRegisterAgentsFromFrontendCats() {
-    var roomId = monitorRoomId();
-    if (!roomId) {
-        return Promise.reject(new Error('房间 ID 为空'));
-    }
-    var cfg = monitorCollectInvokeConfig();
-    monitorValidateCatsForBackend(cfg);
-
-    return monitorHttp('/api/rooms/' + encodeURIComponent(roomId)).then(function(state) {
-        var players = (state.players || []).map(function(p) { return p.player_id; });
-        if (players.length !== cats.length) {
-            throw new Error('后端玩家数与前端猫猫数不一致，请重新联动建房');
-        }
-        monitorState.players = players;
-        monitorState.playerBindings = monitorBuildBindingMap(players);
+    return monitorHttp('/api/ai/bootstrap-from-env', {
+        timeoutMs: 86400000,
+        method: 'POST',
+        body: JSON.stringify({})
+    }).then(function(data) {
+        monitorState.roomId = data.room_id;
+        monitorState.ownerId = data.owner_id || 'cat_01';
+        monitorState.players = data.players || [];
+        monitorState.aiGod = !!data.ai_god;
+        if (data.god_cat_id) monitorState.godCatId = data.god_cat_id;
+        wfState.linkedRoomId = monitorState.roomId;
+        monitorState.playerBindings = monitorBuildBindingMap(monitorState.players);
+        monitorApplyBootstrapRegistrationResult(data);
+        document.getElementById('monitorRoomId').value = monitorState.roomId;
         monitorSyncViewOptions();
+        renderMembers();
+        updateOnlineCount();
 
-        return monitorHttp('/api/ai/rooms/' + encodeURIComponent(roomId) + '/agents/bootstrap', {
-            timeoutMs: 60000,
-            method: 'POST',
-            body: JSON.stringify({
-                host: (cfg.host || 'http://127.0.0.1').replace(/^https?:\/\//, ''),
-                start_port: cfg.startPort,
-                startup_timeout_sec: 20,
-                model_type: 'cat-agent',
-                timeout_sec: 30,
-                api_url: cfg.apiUrl || null,
-                api_key: cfg.apiKey || null,
-                model_name: cfg.modelName || null,
-                cli_command: cfg.cliCommand || null,
-                cli_timeout_sec: 30
-            })
-        }).then(function(boot) {
-            var endpointMap = (boot && boot.endpoints) || {};
-            var results = [];
-            return players.reduce(function(chain, pid, idx) {
-                return chain.then(function() {
-                    var cat = cats[idx];
-                    monitorAddPhaseLog('注册中：' + (cat.name || cat.id || pid));
-                    var provider = cat.provider || 'openai';
-                    var key = (cat.apiKey || '').trim() || (document.getElementById('globalApiKey').value || '').trim();
-                    var body = {
-                        room_id: roomId,
-                        player_id: pid,
-                        nickname: cat.name,
-                        endpoint: endpointMap[pid],
-                        model: provider,
-                        timeout_sec: 30,
-                        api_url: cfg.cliCommand ? null : (cat.apiUrl || null),
-                        api_key: cfg.cliCommand ? null : (key || null),
-                        model_name: cfg.cliCommand ? null : (cat.model || null),
-                        cli_command: cfg.cliCommand || null,
-                        cli_timeout_sec: 30
-                    };
-                    return monitorHttp('/api/agents/register', {
-                        timeoutMs: 110000,
-                        method: 'POST',
-                        body: JSON.stringify(body)
-                    }).then(function(res) {
-                        results.push({ ok: true, pid: pid, catName: cat.name || cat.id, res: res });
-                    }).catch(function(e) {
-                        var detail = (e && e.message) ? e.message : String(e || 'unknown error');
-                        var matched = typeof detail === 'string' ? detail.match(/\{[\s\S]*\}$/) : null;
-                        if (matched && matched[0]) {
-                            try {
-                                var parsed = JSON.parse(matched[0]);
-                                if (parsed && parsed.detail) detail = parsed.detail;
-                            } catch (_) {}
-                        }
-                        results.push({ ok: false, pid: pid, catName: cat.name || cat.id, error: detail });
-                    });
-                });
-            }, Promise.resolve()).then(function() {
-                return results;
-            });
-        }).then(function(results) {
-            var success = results.filter(function(x) { return x && x.ok; });
-            var failed = results.filter(function(x) { return !x || !x.ok; });
-            var mode = ((success[0] && success[0].res && success[0].res.invoke_mode) || (cfg.cliCommand ? 'cli' : 'api'));
-            if (success.length > 0) {
-                monitorRenderGlobal('已按前端猫猫注册 ' + success.length + ' 个Agent · mode=' + mode);
-                monitorAddPhaseLog('猫猫配置已写入后端：成功 ' + success.length + ' 个 · mode=' + mode);
-                addSystemMessage('🤖 已同步前端猫猫到后端（成功 ' + success.length + '只 · ' + mode + '）', 'pipeline-msg');
-            }
-            if (failed.length > 0) {
-                var lines = failed.map(function(f) {
-                    var err = f.error || '注册失败';
-                    var hint = '';
-                    if (/http=502/i.test(err)) {
-                        hint = '（模型网关 502：请检查 API 地址/代理可用性）';
-                    } else if (/ReadTimeout/i.test(err)) {
-                        hint = '（请求超时：建议先减少并发/确认模型响应时延）';
-                    } else if (/endpoint unreachable|not healthy/i.test(err)) {
-                        hint = '（子进程不可达：请检查本机端口占用与防火墙）';
-                    }
-                    return (f.catName || f.pid || 'unknown') + '：' + err + hint;
-                });
-                monitorAddPhaseLog('❌ 注册失败\n' + lines.join('\n'));
-                addSystemMessage('❌ 部分猫猫注册失败（' + failed.length + '只），请检查联动日志', 'pipeline-msg');
-                throw new Error('部分猫猫注册失败：' + lines.join(' | '));
-            }
-            return success.map(function(x) { return x.res; });
+        var boot = (data && data.bootstrap) || {};
+        var reg = (boot && boot.registered_agents) || {};
+        var successCount = Number(reg.count || 0);
+        if (!successCount) {
+            successCount = Number((data.players || []).length || monitorState.players.length || 0);
+        }
+        var retriesTotal = Number(reg.retries_total || 0);
+        var retriedAgents = Number(reg.retried_agents || 0);
+        var agents = reg.agents || {};
+        var firstPid = Object.keys(agents)[0];
+        var mode = (firstPid && agents[firstPid] && agents[firstPid].invoke_mode) || 'api';
+        var judgeMode = monitorJudgeModeLabel(data);
+        monitorRenderGlobal('后端编排完成：' + successCount + ' 个Agent · mode=' + mode + ' · room=' + monitorState.roomId + ' · ' + judgeMode);
+        monitorAddPhaseLog('后端拉起并注册完成：' + successCount + ' 个 · 重试次数=' + retriesTotal + '（涉及' + retriedAgents + '只） · ' + judgeMode);
+        Object.keys(agents).forEach(function(pid) {
+            var item = agents[pid] || {};
+            var attempts = Number(item.attempts || 1);
+            if (attempts <= 1) return;
+            var mapped = monitorState.playerMap[pid] || {};
+            var name = mapped.nickname || item.player_id || pid;
+            var lastErr = item.last_retry_error ? ('；最近错误：' + item.last_retry_error) : '';
+            monitorAddPhaseLog('♻️ ' + name + ' 注册重试 ' + (attempts - 1) + ' 次后成功' + lastErr);
         });
+        addSystemMessage('🤖 后端已完成全流程拉起与注册（' + successCount + '只）', 'pipeline-msg');
+        return agents;
+    }).catch(function(err) {
+        monitorSetAllCatsOnline(false);
+        renderMembers();
+        updateOnlineCount();
+        throw err;
     });
 }
 

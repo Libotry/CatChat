@@ -118,6 +118,7 @@ class HotSwapAgentRequest(BaseModel):
 
 
 class BootstrapAgentsRequest(BaseModel):
+    model_config = ConfigDict(protected_namespaces=())
     host: str = "127.0.0.1"
     start_port: int = Field(default=9101, ge=1, le=65535)
     startup_timeout_sec: float = Field(default=12.0, ge=1.0, le=60.0)
@@ -172,3 +173,15 @@ class ReplayResponse(BaseModel):
 class WSOutboundEvent(BaseModel):
     event: str
     payload: Dict[str, Any]
+
+
+class FrontendProfileRequest(BaseModel):
+    cats: List[Dict[str, Any]] = Field(default_factory=list)
+    monitor_config: Dict[str, Any] = Field(default_factory=dict)
+
+
+class FrontendProfileResponse(BaseModel):
+    source: str
+    cats: List[Dict[str, Any]]
+    monitor_config: Dict[str, Any]
+    saved_at: Optional[str] = None

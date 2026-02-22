@@ -1,9 +1,12 @@
 from __future__ import annotations
 
+import asyncio
+import os
 import time
 from dataclasses import dataclass, field
 from datetime import datetime
 from typing import Dict, Optional
+from urllib.parse import urlparse
 
 import httpx
 
@@ -120,6 +123,74 @@ class AgentScheduler:
         self.metrics = SchedulerMetrics()
         self.audit_logs: list[dict] = []
         self.debug_mode = debug_mode
+        self.provider_max_concurrency = max(1, int(os.getenv("CAT_PROVIDER_MAX_CONCURRENCY", "8")))
+        self.same_provider_max_concurrency = max(1, int(os.getenv("CAT_SAME_PROVIDER_MAX_CONCURRENCY", "1")))
+        self.day_discuss_same_provider_concurrency = max(
+            1,
+            int(os.getenv("CAT_DAY_DISCUSS_SAME_PROVIDER_CONCURRENCY", "2")),
+        )
+        self.day_vote_same_provider_concurrency = max(
+            1,
+            int(os.getenv("CAT_DAY_VOTE_SAME_PROVIDER_CONCURRENCY", "1")),
+        )
+        self.max_timeout_retries = max(0, int(os.getenv("CAT_AGENT_TIMEOUT_RETRIES", "2")))
+        self.max_transient_retries = max(0, int(os.getenv("CAT_AGENT_TRANSIENT_RETRIES", "2")))
+        self.retry_backoff_sec = max(0.1, float(os.getenv("CAT_AGENT_RETRY_BACKOFF_SEC", "0.8")))
+        self._provider_semaphores: Dict[str, asyncio.Semaphore] = {}
+        self._provider_limits: Dict[str, int] = {}
+
+    @staticmethod
+    def _api_timeout_budget(agent: AgentRegistration, phase: str) -> int:
+        if phase in {"day_discuss", "day_vote"}:
+            return max(agent.timeout_sec - 1, 20)
+        if phase.startswith("night_"):
+            return max(agent.timeout_sec - 2, 15)
+        return max(agent.timeout_sec - 2, 15)
+
+    @staticmethod
+    def _transport_timeout_budget(agent: AgentRegistration, phase: str) -> int:
+        if phase in {"day_discuss", "day_vote"}:
+            return max(agent.timeout_sec + 10, 35)
+        return max(agent.timeout_sec + 5, 25)
+
+    def _provider_key(self, agent: AgentRegistration) -> str:
+        if agent.cli_command:
+            return "cli"
+        url = (agent.api_url or "").strip().lower()
+        if url:
+            parsed = urlparse(url)
+            netloc = parsed.netloc or parsed.path
+            model_name = (agent.model_name or "").strip().lower() or "unknown-model"
+            return f"api:{netloc}|model:{model_name}"
+        return f"model:{(agent.model_type or 'unknown').lower()}"
+
+    def _provider_limit(self, agent: AgentRegistration, phase: str) -> int:
+        if agent.cli_command:
+            return self.provider_max_concurrency
+        if (agent.api_url or "").strip():
+            phase_key = (phase or "").strip().lower()
+            if phase_key == "day_vote":
+                return min(self.provider_max_concurrency, self.day_vote_same_provider_concurrency)
+            if phase_key == "day_discuss":
+                return min(self.provider_max_concurrency, self.day_discuss_same_provider_concurrency)
+            return min(self.provider_max_concurrency, self.same_provider_max_concurrency)
+        return self.provider_max_concurrency
+
+    def _provider_semaphore(self, agent: AgentRegistration, phase: str) -> asyncio.Semaphore:
+        key = self._provider_key(agent)
+        sem = self._provider_semaphores.get(key)
+        limit = self._provider_limit(agent, phase)
+        if sem is None:
+            sem = asyncio.Semaphore(limit)
+            self._provider_semaphores[key] = sem
+            self._provider_limits[key] = limit
+            return sem
+        old_limit = self._provider_limits.get(key)
+        if old_limit != limit:
+            sem = asyncio.Semaphore(limit)
+            self._provider_semaphores[key] = sem
+            self._provider_limits[key] = limit
+        return sem
 
     async def trigger_agent_action(
         self,
@@ -148,7 +219,7 @@ class AgentScheduler:
                 "api_url": agent.api_url,
                 "api_key": agent.api_key,
                 "model_name": agent.model_name or agent.model_type,
-                "api_timeout_sec": max(agent.timeout_sec - 5, 10),
+                "api_timeout_sec": self._api_timeout_budget(agent, phase),
                 "cli_command": agent.cli_command,
                 "cli_timeout_sec": agent.cli_timeout_sec,
             },
@@ -167,33 +238,52 @@ class AgentScheduler:
 
         start = time.perf_counter()
         try:
-            async with httpx.AsyncClient(timeout=agent.timeout_sec) as client:
-                resp = await client.post(f"{agent.ipc_endpoint}/act", json=payload)
-            latency_ms = (time.perf_counter() - start) * 1000
+            transport_timeout = self._transport_timeout_budget(agent, phase)
+            timeout_reason: Optional[str] = None
+            async with self._provider_semaphore(agent, phase):
+                max_attempts = max(self.max_timeout_retries, self.max_transient_retries) + 1
+                for attempt in range(max_attempts):
+                    try:
+                        async with httpx.AsyncClient(timeout=transport_timeout) as client:
+                            resp = await client.post(f"{agent.ipc_endpoint}/act", json=payload)
 
-            if resp.status_code >= 400:
-                self.metrics.observe_error(f"http_{resp.status_code}")
-                return self._handle_failure(agent, strategy_name, visible_state, f"http_{resp.status_code}")
+                        if resp.status_code >= 400:
+                            transient = resp.status_code in {429, 500, 502, 503, 504}
+                            if transient and attempt < self.max_transient_retries:
+                                await asyncio.sleep(self.retry_backoff_sec * (2 ** attempt))
+                                continue
+                            self.metrics.observe_error(f"http_{resp.status_code}")
+                            return self._handle_failure(agent, strategy_name, visible_state, f"http_{resp.status_code}")
 
-            data = self._validate_and_parse(resp.json())
-            self.metrics.observe_success(latency_ms)
-            agent.failed_count = 0
-            agent.last_heartbeat = datetime.utcnow()
-            agent.last_error = None
+                        data = self._validate_and_parse(resp.json())
+                        latency_ms = (time.perf_counter() - start) * 1000
+                        self.metrics.observe_success(latency_ms)
+                        agent.failed_count = 0
+                        agent.last_heartbeat = datetime.utcnow()
+                        agent.last_error = None
 
-            self.audit_logs.append(
-                {
-                    "event": "agent_response",
-                    "player_id": player_id,
-                    "phase": phase,
-                    "model_type": agent.model_type,
-                    "latency_ms": round(latency_ms, 2),
-                    "request": self._desensitize_payload(payload),
-                    "response": self._desensitize_payload(data),
-                    "ts": datetime.utcnow().isoformat(),
-                }
-            )
-            return data
+                        self.audit_logs.append(
+                            {
+                                "event": "agent_response",
+                                "player_id": player_id,
+                                "phase": phase,
+                                "model_type": agent.model_type,
+                                "latency_ms": round(latency_ms, 2),
+                                "request": self._desensitize_payload(payload),
+                                "response": self._desensitize_payload(data),
+                                "ts": datetime.utcnow().isoformat(),
+                            }
+                        )
+                        return data
+                    except httpx.TimeoutException:
+                        timeout_reason = f"timeout(retry={attempt})"
+                        if attempt < self.max_timeout_retries:
+                            await asyncio.sleep(self.retry_backoff_sec * (2 ** attempt))
+                            continue
+                        break
+
+            self.metrics.observe_timeout()
+            return self._handle_failure(agent, strategy_name, visible_state, timeout_reason or "timeout")
         except httpx.TimeoutException:
             self.metrics.observe_timeout()
             return self._handle_failure(agent, strategy_name, visible_state, "timeout")
@@ -204,7 +294,7 @@ class AgentScheduler:
     def _handle_failure(self, agent: AgentRegistration, strategy_name: str, context: dict, reason: str) -> dict:
         agent.failed_count += 1
         agent.last_error = reason
-        if agent.failed_count >= 2:
+        if agent.failed_count >= 4:
             agent.online = False
             agent.entrusted = True
         return self._fallback_action(strategy_name, context, reason)
