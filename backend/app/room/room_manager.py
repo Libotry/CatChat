@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import uuid
+import time
 from dataclasses import dataclass, field
 from threading import RLock
 from typing import Dict, Optional
@@ -307,15 +308,22 @@ class RoomManager:
         if not base:
             raise ValueError("ipc_endpoint is required")
         health_url = base + "/health"
-        try:
-            with httpx.Client(timeout=2.5) as client:
-                resp = client.get(health_url)
-            if resp.status_code >= 400:
-                raise ValueError(f"agent endpoint unhealthy: {health_url} -> HTTP {resp.status_code}")
-        except ValueError:
-            raise
-        except Exception as exc:  # noqa: BLE001
-            raise ValueError(f"agent endpoint unreachable: {health_url} ({type(exc).__name__})") from exc
+        deadline = time.time() + 8.0
+        last_error = "unknown"
+        while time.time() < deadline:
+            try:
+                with httpx.Client(timeout=2.5) as client:
+                    resp = client.get(health_url)
+                if resp.status_code < 400:
+                    return
+                last_error = f"HTTP {resp.status_code}"
+            except Exception as exc:  # noqa: BLE001
+                last_error = type(exc).__name__
+            time.sleep(0.25)
+
+        if str(last_error).startswith("HTTP"):
+            raise ValueError(f"agent endpoint unhealthy: {health_url} -> {last_error}")
+        raise ValueError(f"agent endpoint unreachable: {health_url} ({last_error})")
 
     @staticmethod
     def _assert_agent_model_access(

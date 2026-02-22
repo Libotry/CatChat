@@ -20,7 +20,27 @@ for ($i = 1; $i -le $PlayerCount; $i++) {
     ) | Out-Null
 }
 
-Start-Sleep -Seconds 3
+Write-Host "等待子Agent健康检查..."
+$healthDeadline = (Get-Date).AddSeconds(30)
+for ($i = 1; $i -le $PlayerCount; $i++) {
+    $port = $AgentStartPort + $i - 1
+    $url = "http://127.0.0.1:$port/health"
+    $ready = $false
+    while ((Get-Date) -lt $healthDeadline) {
+        try {
+            $resp = Invoke-WebRequest -Method Get -Uri $url -TimeoutSec 2
+            if ($resp.StatusCode -lt 400) {
+                $ready = $true
+                break
+            }
+        } catch {
+            Start-Sleep -Milliseconds 250
+        }
+    }
+    if (-not $ready) {
+        throw "子Agent健康检查超时: $url"
+    }
+}
 
 Write-Host "[2/5] 创建AI房间..."
 $roomResp = Invoke-RestMethod -Method Post -Uri "$BackendBase/api/ai/rooms" -ContentType "application/json" -Body (@{ owner_nickname = "cat_01"; player_count = $PlayerCount } | ConvertTo-Json)
