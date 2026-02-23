@@ -57,6 +57,16 @@ class _InvalidTargetScheduler:
         return {"action": {"target": ""}, "reasoning": ""}
 
 
+class _InvalidRuleTargetScheduler:
+    async def trigger_agent_action(self, **kwargs):
+        phase = kwargs.get("phase")
+        if phase == Phase.NIGHT_GUARD.value:
+            return {"action": {"target": "p5"}, "reasoning": "继续守护上轮目标。"}
+        if phase == Phase.NIGHT_SEER.value:
+            return {"action": {"target": "p9"}, "reasoning": "继续查验上轮目标。"}
+        return {"action": {"target": ""}, "reasoning": ""}
+
+
 def test_god_orchestrator_night_roles_use_random_fallback_when_target_invalid() -> None:
     scheduler = _InvalidTargetScheduler()
     orchestrator = GodOrchestrator(scheduler=scheduler)
@@ -106,3 +116,46 @@ def test_ai_god_orchestrator_night_roles_use_random_fallback_when_target_invalid
     seer_target = engine_seer.snapshot.round_context.night_actions.seer_target
     assert seer_target is not None
     assert seer_target != "p7"
+
+
+def test_god_orchestrator_guard_and_seer_retry_when_target_rule_invalid() -> None:
+    scheduler = _InvalidRuleTargetScheduler()
+    orchestrator = GodOrchestrator(scheduler=scheduler)
+
+    engine_guard = _make_engine()
+    engine_guard.snapshot.phase = Phase.NIGHT_GUARD
+    engine_guard.snapshot.players["p5"].last_guard_target = "p5"
+    asyncio.run(orchestrator._run_guard_phase(engine_guard))
+    guard_target = engine_guard.snapshot.round_context.night_actions.guard_target
+    assert guard_target is not None
+    assert guard_target != "p5"
+
+    engine_seer = _make_engine()
+    engine_seer.snapshot.phase = Phase.NIGHT_SEER
+    engine_seer.snapshot.players["p7"].last_seer_target = "p9"
+    asyncio.run(orchestrator._run_seer_phase(engine_seer))
+    seer_target = engine_seer.snapshot.round_context.night_actions.seer_target
+    assert seer_target is not None
+    assert seer_target != "p9"
+
+
+def test_ai_god_orchestrator_guard_and_seer_retry_when_target_rule_invalid() -> None:
+    scheduler = _InvalidRuleTargetScheduler()
+    orchestrator = AIGodOrchestrator(scheduler=scheduler)
+    god_result = GodNarration(phase="night", narration="", reasoning="")
+
+    engine_guard = _make_engine()
+    engine_guard.snapshot.phase = Phase.NIGHT_GUARD
+    engine_guard.snapshot.players["p5"].last_guard_target = "p5"
+    asyncio.run(orchestrator._run_guard_phase(engine_guard, god_result))
+    guard_target = engine_guard.snapshot.round_context.night_actions.guard_target
+    assert guard_target is not None
+    assert guard_target != "p5"
+
+    engine_seer = _make_engine()
+    engine_seer.snapshot.phase = Phase.NIGHT_SEER
+    engine_seer.snapshot.players["p7"].last_seer_target = "p9"
+    asyncio.run(orchestrator._run_seer_phase(engine_seer, god_result))
+    seer_target = engine_seer.snapshot.round_context.night_actions.seer_target
+    assert seer_target is not None
+    assert seer_target != "p9"

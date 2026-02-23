@@ -266,6 +266,25 @@ class GodOrchestrator:
                 exclude_wolves=False,
                 exclude_player_id=guard.last_guard_target,
             )
+        if target:
+            try:
+                engine.submit_night_action(guard.player_id, target)
+            except ValueError:
+                retry_target = self._random_alive_target(
+                    engine,
+                    actor_id=guard.player_id,
+                    allow_self=True,
+                    exclude_wolves=False,
+                    exclude_player_id=guard.last_guard_target,
+                )
+                if retry_target and retry_target != target:
+                    try:
+                        engine.submit_night_action(guard.player_id, retry_target)
+                        target = retry_target
+                    except ValueError:
+                        target = None
+                else:
+                    target = None
         guard_content = self._guard_speech_text(engine, result, target)
         engine._audit(
             "agent_speech",
@@ -278,11 +297,6 @@ class GodOrchestrator:
                 "fallback_reason": result.get("fallback_reason"),
             },
         )
-        if target:
-            try:
-                engine.submit_night_action(guard.player_id, target)
-            except ValueError:
-                return
 
     async def _run_witch_phase(self, engine: GameEngine) -> None:
         witch = next((p for p in engine.snapshot.players.values() if p.alive and p.role == Role.WITCH), None)
@@ -341,6 +355,25 @@ class GodOrchestrator:
                 exclude_wolves=False,
                 exclude_player_id=seer.last_seer_target,
             )
+        if target:
+            try:
+                engine.submit_night_action(seer.player_id, target)
+            except ValueError:
+                retry_target = self._random_alive_target(
+                    engine,
+                    actor_id=seer.player_id,
+                    allow_self=False,
+                    exclude_wolves=False,
+                    exclude_player_id=seer.last_seer_target,
+                )
+                if retry_target and retry_target != target:
+                    try:
+                        engine.submit_night_action(seer.player_id, retry_target)
+                        target = retry_target
+                    except ValueError:
+                        target = None
+                else:
+                    target = None
         seer_content = self._seer_speech_text(engine, result, target)
         engine._audit(
             "agent_speech",
@@ -353,11 +386,6 @@ class GodOrchestrator:
                 "fallback_reason": result.get("fallback_reason"),
             },
         )
-        if target:
-            try:
-                engine.submit_night_action(seer.player_id, target)
-            except ValueError:
-                return
 
     async def _run_day_discuss(self, engine: GameEngine) -> None:
         alive_players = sorted(
