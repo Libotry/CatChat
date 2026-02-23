@@ -166,8 +166,16 @@ def test_memory_context_hides_night_judge_settlement_from_guard() -> None:
     )
 
     guard_visible = PerspectiveEngine.build_visible_state(engine, "cat_05")
-    public_memory = (guard_visible.get("memory_context") or {}).get("public_memory") or []
+    memory = guard_visible.get("memory_context") or {}
+    public_memory = memory.get("public_memory") or []
+    self_memory = memory.get("self_memory") or []
+    highlights = ((memory.get("game_facts") or {}).get("recent_highlights") or [])
+    summary = str(memory.get("summary") or "")
+
     assert all("今晚目标为" not in str(item.get("content") or "") for item in public_memory)
+    assert all("今晚目标为" not in str(item.get("content") or "") for item in self_memory)
+    assert all("今晚目标为" not in str(item) for item in highlights)
+    assert "今晚目标为" not in summary
 
 
 def test_memory_context_blocks_sensitive_marker_even_in_day_phase() -> None:

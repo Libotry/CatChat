@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import os
+import random
 from typing import Any, Dict, List
 
 from app.core.models import Phase, Role
@@ -13,6 +14,7 @@ class PerspectiveEngine:
     PUBLIC_MEMORY_LIMIT = max(20, int(os.getenv("CAT_PUBLIC_MEMORY_LIMIT", "80")))
     SELF_MEMORY_LIMIT = max(10, int(os.getenv("CAT_SELF_MEMORY_LIMIT", "40")))
     WOLF_MEMORY_LIMIT = max(10, int(os.getenv("CAT_WOLF_MEMORY_LIMIT", "30")))
+    RNG = random.SystemRandom()
     SENSITIVE_MARKERS_COMMON = {
         "今晚目标为",
         "今晚刀",
@@ -79,6 +81,8 @@ class PerspectiveEngine:
         dead_player_ids: List[str] = [
             p.player_id for p in snapshot.players.values() if not p.alive
         ]
+        alive_player_ids = PerspectiveEngine._shuffled_player_ids(alive_player_ids)
+        dead_player_ids = PerspectiveEngine._shuffled_player_ids(dead_player_ids)
 
         alive_players: List[str] = [
             PerspectiveEngine._player_name(snapshot.players.get(pid))
@@ -171,6 +175,14 @@ class PerspectiveEngine:
         return base
 
     @staticmethod
+    def _shuffled_player_ids(player_ids: List[str]) -> List[str]:
+        ids = list(player_ids)
+        if len(ids) <= 1:
+            return ids
+        PerspectiveEngine.RNG.shuffle(ids)
+        return ids
+
+    @staticmethod
     def _extract_public_votes(
         audit_log: list[dict],
         players: dict,
@@ -229,6 +241,8 @@ class PerspectiveEngine:
                 continue
 
             if event_type == "agent_speech":
+                if actor_id == "god" and str(payload.get("role") or "") == "judge":
+                    continue
                 content = str(payload.get("content") or "").strip()
                 if not content:
                     continue

@@ -26,6 +26,15 @@ class FallbackStrategies:
             "hunter_shot": self._hunter_shot_action,
         }
         self._templates: Dict[str, dict] = {}
+        self._rng = random.SystemRandom()
+
+    def _pick_random(self, candidates: list):
+        if not candidates:
+            return None
+        pool = list(dict.fromkeys(candidates))
+        if not pool:
+            return None
+        return self._rng.choice(pool)
 
     def load_templates(self, file_path: str) -> None:
         path = Path(file_path)
@@ -45,7 +54,7 @@ class FallbackStrategies:
         result = dict(template)
         alive = context.get("alive_players", [])
         if result.get("action", {}).get("target") == "__RANDOM_ALIVE__" and alive:
-            result["action"]["target"] = random.choice(alive)
+            result["action"]["target"] = self._pick_random(alive)
         if strategy_name == "day_vote":
             action = result.get("action") or {}
             target = action.get("target") if isinstance(action, dict) else None
@@ -82,8 +91,8 @@ class FallbackStrategies:
                 if not reasoning or (target not in reasoning and "击杀" not in reasoning and "目标" not in reasoning):
                     result["reasoning"] = f"我建议今晚击杀 {target}。"
             else:
-                if not reasoning or ("暂无目标" not in reasoning and "未确定目标" not in reasoning):
-                    result["reasoning"] = "当前信息不足，我暂未确定今晚目标。"
+                if not reasoning or ("无可击杀目标" not in reasoning and "没有可击杀目标" not in reasoning):
+                    result["reasoning"] = "当前无可击杀目标。"
         if strategy_name == "night_guard":
             action = result.get("action") or {}
             target = action.get("target") if isinstance(action, dict) else None
@@ -113,27 +122,25 @@ class FallbackStrategies:
             "reasoning": "fallback/default",
         }
 
-    @staticmethod
-    def _night_wolf_action(context: dict) -> dict:
+    def _night_wolf_action(self, context: dict) -> dict:
         alive = context.get("alive_player_ids") or context.get("alive_players", [])
         wolf_team = context.get("wolf_team_ids") or context.get("wolf_team", [])
         non_wolf = [pid for pid in alive if pid not in wolf_team]
-        target = random.choice(non_wolf) if non_wolf else None
+        target = self._pick_random(non_wolf)
         if target:
             reasoning = f"我建议今晚击杀 {target}。"
         else:
-            reasoning = "当前信息不足，我暂未确定今晚目标。"
+            reasoning = "当前无可击杀目标。"
         return {
             "action": {"type": "kill", "target": target},
             "reasoning": reasoning,
         }
 
-    @staticmethod
-    def _night_guard_action(context: dict) -> dict:
+    def _night_guard_action(self, context: dict) -> dict:
         alive = context.get("alive_player_ids") or context.get("alive_players", [])
         last_guard_target = context.get("last_guard_target_id") or context.get("last_guard_target")
         candidates = [pid for pid in alive if pid != last_guard_target] or alive
-        target = random.choice(candidates) if candidates else None
+        target = self._pick_random(candidates)
         if target:
             reasoning = f"我决定守护 {target}。"
         else:
@@ -143,8 +150,7 @@ class FallbackStrategies:
             "reasoning": reasoning,
         }
 
-    @staticmethod
-    def _night_witch_action(context: dict) -> dict:
+    def _night_witch_action(self, context: dict) -> dict:
         wolf_target = context.get("wolf_target_id") or context.get("wolf_target")
         role_capability = context.get("role_capability", {})
         if wolf_target and role_capability.get("can_use_antidote", False):
@@ -153,18 +159,17 @@ class FallbackStrategies:
                 "reasoning": "fallback/witch_save",
             }
         alive = context.get("alive_player_ids") or context.get("alive_players", [])
-        poison_target = random.choice(alive) if alive and role_capability.get("can_use_poison", False) else None
+        poison_target = self._pick_random(alive) if alive and role_capability.get("can_use_poison", False) else None
         return {
             "action": {"type": "poison", "target": poison_target, "save": False},
             "reasoning": "fallback/witch_skip_or_poison",
         }
 
-    @staticmethod
-    def _night_seer_action(context: dict) -> dict:
+    def _night_seer_action(self, context: dict) -> dict:
         alive = context.get("alive_player_ids") or context.get("alive_players", [])
         me = context.get("player_id")
         candidates = [pid for pid in alive if pid != me]
-        target = random.choice(candidates) if candidates else None
+        target = self._pick_random(candidates)
         if target:
             reasoning = f"第一夜信息有限，我查验了 {target} 以获取身份线索。"
         else:
@@ -174,12 +179,11 @@ class FallbackStrategies:
             "reasoning": reasoning,
         }
 
-    @staticmethod
-    def _day_vote_action(context: dict) -> dict:
+    def _day_vote_action(self, context: dict) -> dict:
         alive = context.get("alive_player_ids") or context.get("alive_players", [])
         me = context.get("player_id")
         candidates = [pid for pid in alive if pid != me]
-        target = random.choice(candidates) if candidates else None
+        target = self._pick_random(candidates)
         if target:
             reasoning = f"信息有限，我投票给 {target}。"
             speech = f"当前信息有限，我投票给 {target}。"
@@ -203,12 +207,11 @@ class FallbackStrategies:
             "reasoning": f"我是{role}，当前信息有限，先观察发言逻辑。",
         }
 
-    @staticmethod
-    def _hunter_shot_action(context: dict) -> dict:
+    def _hunter_shot_action(self, context: dict) -> dict:
         alive = context.get("alive_player_ids") or context.get("alive_players", [])
         me = context.get("player_id")
         candidates = [pid for pid in alive if pid != me]
-        target = random.choice(candidates) if candidates else None
+        target = self._pick_random(candidates)
         if target:
             reasoning = f"我决定开枪带走 {target}。"
         else:

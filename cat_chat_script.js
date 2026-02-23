@@ -72,6 +72,10 @@ let monitorState = {
     speechRenderedKeys: {},
     narrationSeenKeys: {},
     lastStateOrder: -1,
+    wsLastEventId: 0,
+    pendingRoomState: null,
+    roomStateFlushScheduled: false,
+    phaseStatePullTimer: null,
     pendingPhaseChangedPayload: null,
     players: [],
     playerMap: {},
@@ -647,6 +651,24 @@ function werewolfPseudoCat(playerId) {
     };
 }
 
+function monitorSanitizeDayDiscussDisplayText(text) {
+    var speech = String(text || '').trim();
+    if (!speech) return speech;
+    var replaced = speech;
+    [
+        ['暴露狼人身份', '暴露真实身份'],
+        ['狼人身份', '真实身份'],
+        ['（狼人）', '（疑似狼人）'],
+        ['就是狼人', '疑似狼人'],
+        ['必是狼人', '疑似狼人'],
+        ['是狼人', '疑似狼人'],
+        ['为狼人', '疑似狼人']
+    ].forEach(function(pair) {
+        replaced = replaced.split(pair[0]).join(pair[1]);
+    });
+    return replaced;
+}
+
 function werewolfRenderLinkedSpeech(entry) {
     if (!entry) return;
     // Handle god_narration entries from AI God Orchestrator
@@ -682,6 +704,9 @@ function werewolfRenderLinkedSpeech(entry) {
     var phaseLabel = phaseMap[entry.phase] || monitorPhaseLabel(entry.phase);
     var content = (entry.content || '').trim();
     if (!content) content = '（无文本返回）';
+    if (entry.phase === 'day_discuss') {
+        content = monitorSanitizeDayDiscussDisplayText(content);
+    }
     if (entry.phase === 'night_wolf_discuss') {
         content = '【讨论】' + content;
     }
@@ -2840,6 +2865,13 @@ function monitorConnectWs() {
     var playerId = monitorState.ownerId || 'cat_01';
     var wsUrl = monitorWsUrl(roomId, playerId);
     var ws = new WebSocket(wsUrl);
+    monitorState.wsLastEventId = 0;
+    monitorState.pendingRoomState = null;
+    monitorState.roomStateFlushScheduled = false;
+    if (monitorState.phaseStatePullTimer) {
+        clearTimeout(monitorState.phaseStatePullTimer);
+        monitorState.phaseStatePullTimer = null;
+    }
     monitorState.ws = ws;
     monitorRenderGlobal('正在连接：' + wsUrl);
 
@@ -2871,6 +2903,13 @@ function monitorConnectWs() {
 }
 
 function monitorHandleWsEvent(msg) {
+    var eventId = Number(msg && msg.event_id);
+    if (Number.isFinite(eventId) && eventId > 0) {
+        if (eventId <= (monitorState.wsLastEventId || 0)) {
+            return;
+        }
+        monitorState.wsLastEventId = eventId;
+    }
     var evt = msg.event;
     var payload = msg.payload || {};
     if (evt === 'subscribed') {
@@ -2885,7 +2924,7 @@ function monitorHandleWsEvent(msg) {
         return;
     }
     if (evt === 'room_state') {
-        monitorApplyRoomState(payload);
+        monitorQueueRoomState(payload);
         return;
     }
     if (evt === 'phase_changed') {
@@ -2894,12 +2933,7 @@ function monitorHandleWsEvent(msg) {
             monitorAddPhaseLog('🐺 狼队目标: ' + JSON.stringify(payload.god_view));
         }
         monitorState.pendingPhaseChangedPayload = payload;
-        var roomId = monitorRoomId();
-        if (roomId) {
-            monitorHttp('/api/rooms/' + encodeURIComponent(roomId)).then(function(state) {
-                monitorApplyRoomState(state);
-            }).catch(function() {});
-        }
+        monitorSchedulePhaseStatePull();
         return;
     }
     if (evt === 'agent_status_update') {
@@ -2991,8 +3025,8 @@ function monitorApplyRoomState(state) {
                 }
             }
         });
-        if (monitorState.speechTimeline.length > 80) {
-            monitorState.speechTimeline = monitorState.speechTimeline.slice(-80);
+        if (monitorState.speechTimeline.length > 240) {
+            monitorState.speechTimeline = monitorState.speechTimeline.slice(-240);
         }
         monitorRenderSpeech();
     }
@@ -3568,4 +3602,37 @@ function monitorRenderGodBoard(state) {
         return name + ' · ' + role + ' · ' + alive + ' · ' + status;
     });
     el.innerHTML = rows.map(function(r) { return '<div class="mn-list-item">' + escapeHtml(r) + '</div>'; }).join('');
+}
+
+function monitorQueueRoomState(state) {
+    monitorState.pendingRoomState = state || null;
+    if (monitorState.phaseStatePullTimer) {
+        clearTimeout(monitorState.phaseStatePullTimer);
+        monitorState.phaseStatePullTimer = null;
+    }
+    if (monitorState.roomStateFlushScheduled) return;
+    monitorState.roomStateFlushScheduled = true;
+    requestAnimationFrame(function() {
+        monitorState.roomStateFlushScheduled = false;
+        var latest = monitorState.pendingRoomState;
+        monitorState.pendingRoomState = null;
+        if (!latest) return;
+        monitorApplyRoomState(latest);
+    });
+}
+
+function monitorSchedulePhaseStatePull() {
+    if (monitorState.phaseStatePullTimer) {
+        clearTimeout(monitorState.phaseStatePullTimer);
+        monitorState.phaseStatePullTimer = null;
+    }
+    monitorState.phaseStatePullTimer = setTimeout(function() {
+        monitorState.phaseStatePullTimer = null;
+        if (monitorState.pendingRoomState) return;
+        var roomId = monitorRoomId();
+        if (!roomId) return;
+        monitorHttp('/api/rooms/' + encodeURIComponent(roomId)).then(function(state) {
+            monitorQueueRoomState(state);
+        }).catch(function() {});
+    }, 260);
 }

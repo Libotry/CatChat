@@ -127,3 +127,31 @@ def test_vote_speech_text_removes_target_conflict_when_abstain() -> None:
     assert "投票给" not in s1
     assert "弃票" in s2
     assert "投票给" not in s2
+
+
+def test_witch_speech_text_keeps_action_conclusion_consistent() -> None:
+    engine = SimpleNamespace(
+        snapshot=SimpleNamespace(
+            players={
+                "p2": SimpleNamespace(nickname="波斯猫"),
+                "p3": SimpleNamespace(nickname="奶牛猫"),
+            },
+            round_context=SimpleNamespace(wolf_target="p2"),
+        )
+    )
+    result = {
+        "speech": "今晚局势很乱，我先稳住节奏。我不使用解药，也不使用毒药。",
+    }
+
+    s1 = GodOrchestrator()._witch_speech_text(engine, result, target_id="p3", save=True)
+    s2 = AIGodOrchestrator()._witch_speech_text(engine, result, target_id="p3", save=True)
+
+    assert "使用解药：是（救助目标：波斯猫）。" in s1
+    assert "使用毒药：是（毒杀目标：奶牛猫）。" in s1
+    assert "不使用解药" not in s1
+    assert "不使用毒药" not in s1
+
+    assert "使用解药：是（救助目标：波斯猫）。" in s2
+    assert "使用毒药：是（毒杀目标：奶牛猫）。" in s2
+    assert "不使用解药" not in s2
+    assert "不使用毒药" not in s2

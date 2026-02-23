@@ -15,6 +15,7 @@ import logging
 import os
 import random
 import re
+import secrets
 import time
 from dataclasses import dataclass, field
 from typing import Any, Dict, List, Optional
@@ -31,6 +32,7 @@ logger = logging.getLogger("uvicorn.error")
 logger.setLevel(logging.INFO)
 DAY_PHASE_MAX_CONCURRENCY = max(1, int(os.getenv("CAT_DAY_PHASE_MAX_CONCURRENCY", "8")))
 WOLF_PHASE_MAX_CONCURRENCY = max(1, int(os.getenv("CAT_WOLF_PHASE_MAX_CONCURRENCY", "2")))
+WOLF_DISCUSSION_MAX_ROUNDS = max(1, int(os.getenv("CAT_WOLF_DISCUSSION_MAX_ROUNDS", "3")))
 LLM_LOG_MAX_CHARS = max(100, int(os.getenv("CAT_LLM_LOG_MAX_CHARS", "1024")))
 
 
@@ -435,57 +437,81 @@ class AIGodOrchestrator:
         if not wolves:
             return
 
-        proposals: dict[str, str] = {}
         discussion_so_far: list[dict] = []
-        for wolf in wolves:
-            visible = self.perspective.build_visible_state(engine, wolf.player_id)
-            visible["god_narration"] = god_result.narration
-            visible["wolf_teammates"] = [
-                {
-                    "player_id": p.player_id,
-                    "nickname": p.nickname,
-                }
-                for p in wolves
-                if p.player_id != wolf.player_id
-            ]
-            visible["wolf_discussion_so_far"] = list(discussion_so_far)
-            result = await self.scheduler.trigger_agent_action(
-                player_id=wolf.player_id,
-                session_id=engine.snapshot.room_id,
-                role=Role.WEREWOLF.value,
-                phase="night_wolf_discuss",
-                visible_state=visible,
-                prompt_template=self.templates.night_wolf_discuss,
-                strategy_name="night_wolf",
-            )
-            target = self._normalize_target(engine, result.get("action", {}).get("target"), exclude_wolves=True)
-            speech = self._wolf_discuss_speech_text(engine, result, target)
-            is_fallback = bool(result.get("fallback_reason"))
-            fallback_reason = result.get("fallback_reason")
-            engine._audit(
-                "agent_speech",
-                wolf.player_id,
-                {
-                    "phase": "night_wolf_discuss",
-                    "role": Role.WEREWOLF.value,
-                    "content": speech,
-                    "is_fallback": is_fallback,
-                    "fallback_reason": fallback_reason,
-                },
-            )
-            discussion_so_far.append(
-                {
-                    "player_id": wolf.player_id,
-                    "nickname": wolf.nickname,
-                    "content": speech,
-                    "target": target,
-                    "is_fallback": is_fallback,
-                }
-            )
-            if target:
-                proposals[wolf.player_id] = target
+        consensus_target: Optional[str] = None
+        consensus_round = 0
+        for discussion_round in range(1, WOLF_DISCUSSION_MAX_ROUNDS + 1):
+            proposals: dict[str, str] = {}
+            for wolf in wolves:
+                visible = self.perspective.build_visible_state(engine, wolf.player_id)
+                visible["god_narration"] = god_result.narration
+                visible["wolf_teammates"] = self._shuffled_wolf_teammates(wolves, viewer_id=wolf.player_id)
+                visible["wolf_discussion_round"] = discussion_round
+                visible["wolf_discussion_so_far"] = list(discussion_so_far)
+                result = await self.scheduler.trigger_agent_action(
+                    player_id=wolf.player_id,
+                    session_id=engine.snapshot.room_id,
+                    role=Role.WEREWOLF.value,
+                    phase="night_wolf_discuss",
+                    visible_state=visible,
+                    prompt_template=self.templates.night_wolf_discuss,
+                    strategy_name="night_wolf",
+                )
+                target = self._normalize_target(engine, result.get("action", {}).get("target"), exclude_wolves=True)
+                if not target:
+                    target = self._normalize_target(engine, self._speech_text(result, default=""), exclude_wolves=True)
+                if not target:
+                    target = self._random_alive_target(
+                        engine,
+                        actor_id=wolf.player_id,
+                        allow_self=False,
+                        exclude_wolves=True,
+                    )
+                speech = self._wolf_discuss_speech_text(engine, result, target)
+                is_fallback = bool(result.get("fallback_reason"))
+                fallback_reason = result.get("fallback_reason")
+                engine._audit(
+                    "agent_speech",
+                    wolf.player_id,
+                    {
+                        "phase": "night_wolf_discuss",
+                        "role": Role.WEREWOLF.value,
+                        "content": speech,
+                        "is_fallback": is_fallback,
+                        "fallback_reason": fallback_reason,
+                    },
+                )
+                discussion_so_far.append(
+                    {
+                        "player_id": wolf.player_id,
+                        "nickname": wolf.nickname,
+                        "content": speech,
+                        "target": target,
+                        "round": discussion_round,
+                        "is_fallback": is_fallback,
+                    }
+                )
+                if target:
+                    proposals[wolf.player_id] = target
 
-        consensus_target = self._consensus_target(engine, proposals)
+            consensus_target = self._consensus_target(engine, proposals)
+            if consensus_target:
+                consensus_round = discussion_round
+                break
+
+            if discussion_round < WOLF_DISCUSSION_MAX_ROUNDS:
+                engine._audit(
+                    "agent_speech",
+                    "god",
+                    {
+                        "phase": Phase.NIGHT_WOLF.value,
+                        "role": "judge",
+                        "content": f"狼人第{discussion_round}轮讨论未达成一致，进入下一轮讨论。",
+                        "is_fallback": False,
+                        "fallback_reason": None,
+                    },
+                )
+
         used_fallback = False
         if not consensus_target:
             consensus_target = self._fallback_wolf_target(engine)
@@ -495,7 +521,12 @@ class AIGodOrchestrator:
 
         consensus_name = engine.snapshot.players[consensus_target].nickname or consensus_target
         if used_fallback:
-            judge_line = f"狼人讨论未形成一致，法官按托管规则选定：今晚目标为 {consensus_name}。"
+            judge_line = (
+                f"狼人连续{WOLF_DISCUSSION_MAX_ROUNDS}轮讨论未形成一致，法官按托管规则选定："
+                f"今晚目标为 {consensus_name}。"
+            )
+        elif consensus_round > 1:
+            judge_line = f"狼人已在第{consensus_round}轮讨论达成一致：今晚目标为 {consensus_name}。"
         else:
             judge_line = f"狼人已讨论并达成一致：今晚目标为 {consensus_name}。"
         engine._audit(
@@ -528,6 +559,21 @@ class AIGodOrchestrator:
         rng.shuffle(wolves)
         return wolves
 
+    @staticmethod
+    def _shuffled_wolf_teammates(wolves: list, *, viewer_id: str) -> list[dict]:
+        teammates = [
+            {
+                "player_id": p.player_id,
+                "nickname": p.nickname,
+            }
+            for p in wolves
+            if p.player_id != viewer_id
+        ]
+        if len(teammates) <= 1:
+            return teammates
+        secrets.SystemRandom().shuffle(teammates)
+        return teammates
+
     async def _run_guard_phase(self, engine: GameEngine, god_result: GodNarration) -> None:
         guard = next((p for p in engine.snapshot.players.values() if p.alive and p.role == Role.GUARD), None)
         if not guard:
@@ -544,6 +590,14 @@ class AIGodOrchestrator:
             strategy_name="night_guard",
         )
         target = self._normalize_target(engine, result.get("action", {}).get("target"), allow_self=True)
+        if not target:
+            target = self._random_alive_target(
+                engine,
+                actor_id=guard.player_id,
+                allow_self=True,
+                exclude_wolves=False,
+                exclude_player_id=guard.last_guard_target,
+            )
         guard_content = self._guard_speech_text(engine, result, target)
         engine._audit(
             "agent_speech",
@@ -580,22 +634,7 @@ class AIGodOrchestrator:
         action = result.get("action", {})
         target = self._normalize_target(engine, action.get("target"), allow_self=False)
         save = bool(action.get("save", False))
-        witch_content = self._speech_text(result, default="女巫正在权衡药剂使用。")
-        if save:
-            wolf_target = engine.snapshot.round_context.wolf_target
-            wolf_name = (
-                (engine.snapshot.players[wolf_target].nickname or wolf_target)
-                if wolf_target and wolf_target in engine.snapshot.players
-                else "未知"
-            )
-            witch_content += f" 使用解药：是（救助目标：{wolf_name}）。"
-        else:
-            witch_content += " 使用解药：否。"
-        if target:
-            poison_name = engine.snapshot.players[target].nickname or target
-            witch_content += f" 使用毒药：是（毒杀目标：{poison_name}）。"
-        else:
-            witch_content += " 使用毒药：否。"
+        witch_content = self._witch_speech_text(engine, result, target_id=target, save=save)
         engine._audit(
             "agent_speech",
             witch.player_id,
@@ -628,6 +667,14 @@ class AIGodOrchestrator:
             strategy_name="night_seer",
         )
         target = self._normalize_target(engine, result.get("action", {}).get("target"), allow_self=False)
+        if not target:
+            target = self._random_alive_target(
+                engine,
+                actor_id=seer.player_id,
+                allow_self=False,
+                exclude_wolves=False,
+                exclude_player_id=seer.last_seer_target,
+            )
         seer_content = self._seer_speech_text(engine, result, target)
         engine._audit(
             "agent_speech",
@@ -916,6 +963,8 @@ class AIGodOrchestrator:
             return speech
 
         replacements = [
+            ("暴露狼人身份", "暴露真实身份"),
+            ("狼人身份", "真实身份"),
             ("（狼人）", "（疑似狼人）"),
             ("是狼人", "疑似狼人"),
             ("就是狼人", "疑似狼人"),
@@ -995,6 +1044,50 @@ class AIGodOrchestrator:
             return explicit
         return f"{explicit} {base}".strip()
 
+    def _witch_speech_text(self, engine: GameEngine, result: dict, *, target_id: Optional[str], save: bool) -> str:
+        base = self._speech_text(result, default="").strip()
+        rationale = self._strip_witch_decision_sentences(base)
+
+        if save:
+            wolf_target = engine.snapshot.round_context.wolf_target
+            wolf_name = (
+                (engine.snapshot.players[wolf_target].nickname or wolf_target)
+                if wolf_target and wolf_target in engine.snapshot.players
+                else "未知"
+            )
+            antidote_line = f"使用解药：是（救助目标：{wolf_name}）。"
+        else:
+            antidote_line = "使用解药：否。"
+
+        if target_id:
+            poison_name = engine.snapshot.players[target_id].nickname or target_id
+            poison_line = f"使用毒药：是（毒杀目标：{poison_name}）。"
+        else:
+            poison_line = "使用毒药：否。"
+
+        if rationale:
+            return f"{rationale} {antidote_line} {poison_line}".strip()
+        return f"女巫正在权衡药剂使用。 {antidote_line} {poison_line}".strip()
+
+    @staticmethod
+    def _strip_witch_decision_sentences(text: str) -> str:
+        raw = str(text or "").strip()
+        if not raw:
+            return ""
+        parts = re.split(r"[。；;!?！？\n]+", raw)
+        kept: list[str] = []
+        decision_keywords = ("解药", "毒药", "使用药", "救助", "毒杀", "救人", "自救", "不救", "不使用")
+        for part in parts:
+            seg = part.strip()
+            if not seg:
+                continue
+            if any(keyword in seg for keyword in decision_keywords):
+                continue
+            kept.append(seg)
+        if not kept:
+            return ""
+        return "。".join(kept) + "。"
+
     def _hunter_speech_text(self, engine: GameEngine, result: dict, target_id: Optional[str]) -> str:
         base = self._speech_text(result, default="")
         if target_id:
@@ -1013,19 +1106,41 @@ class AIGodOrchestrator:
 
     def _wolf_discuss_speech_text(self, engine: GameEngine, result: dict, target_id: Optional[str]) -> str:
         base = self._speech_text(result, default="")
+        ambiguous_markers = ("暂无目标", "未确定目标", "再看看", "先观望", "暂时不刀", "暂未确定今晚目标")
         if target_id:
             target_name = engine.snapshot.players[target_id].nickname or target_id
-            if base and (target_id in base or target_name in base):
+            has_target_mention = bool(base and (target_id in base or target_name in base))
+            has_conflict = self._wolf_discuss_has_conflicting_target(engine, base, target_id) if base else False
+            if base and has_target_mention and not has_conflict and not any(marker in base for marker in ambiguous_markers):
                 return base
             explicit = f"我建议今晚击杀 {target_name}。"
         else:
-            if base and ("暂无目标" in base or "未确定目标" in base):
+            if base and ("无可击杀目标" in base or "没有可击杀目标" in base):
                 return base
-            explicit = "我暂未确定今晚目标。"
+            explicit = "当前无可击杀目标。"
 
         if not base:
             return explicit
+        if target_id:
+            return explicit
         return f"{explicit} {base}".strip()
+
+    @staticmethod
+    def _wolf_discuss_has_conflicting_target(engine: GameEngine, text: str, target_id: str) -> bool:
+        if not text or not target_id:
+            return False
+        target_name = engine.snapshot.players[target_id].nickname or target_id
+        probe = str(text)
+        for player in engine.snapshot.players.values():
+            pid = player.player_id
+            if pid == target_id or player.role == Role.WEREWOLF:
+                continue
+            nick = (player.nickname or "").strip()
+            if pid and pid in probe and pid not in (target_id, target_name):
+                return True
+            if nick and nick in probe and nick != target_name:
+                return True
+        return False
 
     def _guard_speech_text(self, engine: GameEngine, result: dict, target_id: Optional[str]) -> str:
         base = self._speech_text(result, default="")
@@ -1051,12 +1166,24 @@ class AIGodOrchestrator:
         counter: dict[str, int] = {}
         for _, target in proposals.items():
             counter[target] = counter.get(target, 0) + 1
-        best_score = max(counter.values()) if counter else 0
-        leaders = {target for target, score in counter.items() if score == best_score}
-        for _, target in proposals.items():
-            if target in leaders:
-                return target
-        return None
+        if not counter:
+            return None
+
+        alive_wolf_count = len([p for p in engine.snapshot.players.values() if p.alive and p.role == Role.WEREWOLF])
+        if alive_wolf_count <= 1:
+            required_votes = 1
+        elif alive_wolf_count == 2:
+            required_votes = 2
+        else:
+            required_votes = alive_wolf_count // 2 + 1
+
+        best_target, best_score = max(counter.items(), key=lambda item: item[1])
+        leaders = [target for target, score in counter.items() if score == best_score]
+        if len(leaders) != 1:
+            return None
+        if best_score < required_votes:
+            return None
+        return best_target
 
     @staticmethod
     def _fallback_wolf_target(engine: GameEngine) -> Optional[str]:
@@ -1067,11 +1194,7 @@ class AIGodOrchestrator:
         ]
         if not candidates:
             return None
-        candidates.sort()
-        round_no = getattr(engine.snapshot.round_context, "round_no", 0)
-        seed = f"{engine.snapshot.room_id}|{round_no}|night_wolf_fallback"
-        rng = random.Random(seed)
-        return rng.choice(candidates)
+        return secrets.choice(candidates)
 
     @staticmethod
     def _emit_day_announce_summary(engine: GameEngine) -> None:
@@ -1139,28 +1262,90 @@ class AIGodOrchestrator:
         if not raw:
             return None
 
-        resolved_id: Optional[str] = None
-        if raw in engine.snapshot.players:
-            resolved_id = raw
-        else:
+        players = list(engine.snapshot.players.values())
+
+        def _compact(text: str) -> str:
+            cleaned = re.sub(r"[\s\[\]【】()（）{}<>《》'\"“”‘’`~!！?？,，.。:：;；、\\/\\|·_-]+", "", text or "")
+            return cleaned.lower()
+
+        def _resolve_token(token: str) -> Optional[str]:
+            probe = (token or "").strip()
+            if not probe:
+                return None
+            if probe in engine.snapshot.players:
+                return probe
+
             exact = [
                 p.player_id
-                for p in engine.snapshot.players.values()
-                if (p.nickname or "").strip() == raw
+                for p in players
+                if (p.nickname or "").strip() == probe
             ]
             if len(exact) == 1:
-                resolved_id = exact[0]
-            elif len(exact) > 1:
+                return exact[0]
+            if len(exact) > 1:
                 return None
-            else:
-                lowered = raw.lower()
-                fuzzy = [
-                    p.player_id
-                    for p in engine.snapshot.players.values()
-                    if (p.nickname or "").strip().lower() == lowered
-                ]
-                if len(fuzzy) == 1:
-                    resolved_id = fuzzy[0]
+
+            lowered = probe.lower()
+            fuzzy = [
+                p.player_id
+                for p in players
+                if (p.nickname or "").strip().lower() == lowered
+            ]
+            if len(fuzzy) == 1:
+                return fuzzy[0]
+            if len(fuzzy) > 1:
+                return None
+
+            mentions = []
+            for p in players:
+                pid = p.player_id
+                nick = (p.nickname or "").strip()
+                if pid and pid in probe:
+                    mentions.append(pid)
+                    continue
+                if nick and nick in probe:
+                    mentions.append(pid)
+            mention_ids = sorted(set(mentions))
+            if len(mention_ids) == 1:
+                return mention_ids[0]
+            if len(mention_ids) > 1:
+                return None
+
+            compact_probe = _compact(probe)
+            if not compact_probe:
+                return None
+            compact_hits = []
+            for p in players:
+                nick = (p.nickname or "").strip()
+                if not nick:
+                    continue
+                compact_nick = _compact(nick)
+                if not compact_nick:
+                    continue
+                if compact_probe == compact_nick:
+                    compact_hits.append(p.player_id)
+                    continue
+                if len(compact_probe) >= 2 and len(compact_nick) >= 2 and (
+                    compact_probe in compact_nick or compact_nick in compact_probe
+                ):
+                    compact_hits.append(p.player_id)
+            compact_ids = sorted(set(compact_hits))
+            if len(compact_ids) == 1:
+                return compact_ids[0]
+            return None
+
+        resolved_id: Optional[str] = None
+        for keyword_match in re.finditer(
+            r"(?:目标(?:为|是)?|刀(?:掉)?|击杀|袭击|投(?:票)?给|守护|查验|毒(?:杀)?|开枪(?:带走)?)\s*[:：]?\s*([A-Za-z0-9_\-\u4e00-\u9fff]{1,20})",
+            raw,
+            flags=re.IGNORECASE,
+        ):
+            resolved_id = _resolve_token(keyword_match.group(1))
+            if resolved_id:
+                break
+
+        if not resolved_id:
+            resolved_id = _resolve_token(raw)
 
         if not resolved_id:
             return None
@@ -1171,6 +1356,35 @@ class AIGodOrchestrator:
         if exclude_wolves and player.role == Role.WEREWOLF:
             return None
         return resolved_id
+
+    @staticmethod
+    def _random_alive_target(
+        engine: GameEngine,
+        *,
+        actor_id: Optional[str],
+        allow_self: bool,
+        exclude_wolves: bool,
+        exclude_player_id: Optional[str] = None,
+    ) -> Optional[str]:
+        candidates = [
+            p.player_id
+            for p in engine.snapshot.players.values()
+            if p.alive
+            and (allow_self or p.player_id != actor_id)
+            and (not exclude_wolves or p.role != Role.WEREWOLF)
+            and (not exclude_player_id or p.player_id != exclude_player_id)
+        ]
+        if not candidates and exclude_player_id:
+            candidates = [
+                p.player_id
+                for p in engine.snapshot.players.values()
+                if p.alive
+                and (allow_self or p.player_id != actor_id)
+                and (not exclude_wolves or p.role != Role.WEREWOLF)
+            ]
+        if not candidates:
+            return None
+        return secrets.choice(candidates)
 
     @staticmethod
     def _death_cause_label(cause: str) -> str:

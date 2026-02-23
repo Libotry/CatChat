@@ -2,6 +2,7 @@ from app.agent.ai_god_orchestrator import AIGodOrchestrator
 from app.agent.god_orchestrator import GodOrchestrator
 from app.core.models import Role
 from app.engine.game_engine import GameEngine
+import asyncio
 
 
 def _make_engine() -> GameEngine:
@@ -58,3 +59,52 @@ def test_fallback_wolf_target_returns_non_wolf_alive() -> None:
     assert fallback_2 is not None
     assert engine.snapshot.players[fallback_1].role != Role.WEREWOLF
     assert engine.snapshot.players[fallback_2].role != Role.WEREWOLF
+
+
+class _WolfSpeechConsensusScheduler:
+    async def trigger_agent_action(self, **kwargs):
+        return {
+            "action": {"target": None},
+            "reasoning": "第一夜信息不足，建议随机刀人。为了避开刀到神职概率高的常见位（如猫猫或折耳），先刀波斯猫。",
+        }
+
+
+def _judge_line(engine: GameEngine) -> str:
+    rows = [
+        row
+        for row in engine.snapshot.action_audit_log
+        if row.get("event_type") == "agent_speech"
+        and row.get("actor_id") == "god"
+    ]
+    if not rows:
+        return ""
+    payload = rows[-1].get("payload") or {}
+    return str(payload.get("content") or "")
+
+
+def test_consensus_can_be_inferred_from_wolf_speech_text() -> None:
+    engine = _make_engine()
+    scheduler = _WolfSpeechConsensusScheduler()
+    orchestrator = GodOrchestrator(scheduler=scheduler)
+
+    asyncio.run(orchestrator._run_wolf_phase(engine))
+
+    judge_line = _judge_line(engine)
+    assert "达成一致" in judge_line
+    assert "未形成一致" not in judge_line
+    assert "波斯" in judge_line
+
+
+def test_ai_consensus_can_be_inferred_from_wolf_speech_text() -> None:
+    engine = _make_engine()
+    scheduler = _WolfSpeechConsensusScheduler()
+    orchestrator = AIGodOrchestrator(scheduler=scheduler)
+
+    from app.agent.ai_god_orchestrator import GodNarration
+
+    asyncio.run(orchestrator._run_wolf_phase(engine, GodNarration(phase="night_wolf", narration="", reasoning="")))
+
+    judge_line = _judge_line(engine)
+    assert "达成一致" in judge_line
+    assert "未形成一致" not in judge_line
+    assert "波斯" in judge_line

@@ -184,6 +184,20 @@ class WSConnectionManager:
             }
             for item in players
         ]
+
+        speech_history = filtered.get("speech_history", [])
+        if isinstance(speech_history, list):
+            sanitized_history = []
+            for item in speech_history:
+                if not isinstance(item, dict):
+                    continue
+                if item.get("player_id") == "god" and item.get("event") == "agent_speech":
+                    continue
+                sanitized = dict(item)
+                sanitized.pop("thought_content", None)
+                sanitized_history.append(sanitized)
+            filtered["speech_history"] = sanitized_history
+
         filtered["watch_player"] = watch_player
         return filtered
 

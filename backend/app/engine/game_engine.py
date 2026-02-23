@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import random
+import re
 from datetime import datetime, timedelta
 from typing import Callable, Dict, List, Optional
 
@@ -18,7 +19,21 @@ from app.engine.phase_orchestrator import PhaseOrchestrator
 from app.roles.skills import SKILL_REGISTRY, resolve_wolf_target
 
 
+SYSTEM_RNG = random.SystemRandom()
+
+
+def _pick_random_target(candidates: List[str]) -> Optional[str]:
+    if not candidates:
+        return None
+    pool = list(dict.fromkeys(candidates))
+    if not pool:
+        return None
+    return SYSTEM_RNG.choice(pool)
+
+
 class GameEngine:
+    PUBLIC_SPEECH_HISTORY_LIMIT = 120
+
     def __init__(self, room_id: str, owner_id: str, config: Optional[GameConfig] = None) -> None:
         self.snapshot = GameSnapshot(room_id=room_id, owner_id=owner_id)
         self.config = config or default_game_config()
@@ -197,7 +212,10 @@ class GameEngine:
             votes = self.snapshot.round_context.night_actions.wolf_votes
             if wolf_id in votes or not alive_non_wolf:
                 continue
-            votes[wolf_id] = random.choice(alive_non_wolf)
+            picked = _pick_random_target(alive_non_wolf)
+            if not picked:
+                continue
+            votes[wolf_id] = picked
             self._audit("auto_action", wolf_id, {"phase": "night_wolf"})
 
     def _autorun_guard_phase(self) -> None:
@@ -214,7 +232,10 @@ class GameEngine:
         ]
         if not candidates:
             candidates = [p.player_id for p in self.snapshot.players.values() if p.alive]
-        self.snapshot.round_context.night_actions.guard_target = random.choice(candidates)
+        picked = _pick_random_target(candidates)
+        if not picked:
+            return
+        self.snapshot.round_context.night_actions.guard_target = picked
         guard.last_guard_target = self.snapshot.round_context.night_actions.guard_target
         self._audit("auto_action", guard.player_id, {"phase": "night_guard"})
 
@@ -242,7 +263,9 @@ class GameEngine:
             ]
         if not candidates:
             return
-        target_id = random.choice(candidates)
+        target_id = _pick_random_target(candidates)
+        if not target_id:
+            return
         self.snapshot.round_context.night_actions.seer_target = target_id
         seer.last_seer_target = target_id
         self._audit("auto_action", seer.player_id, {"phase": "night_seer"})
@@ -579,6 +602,15 @@ class GameEngine:
         self._trigger_hook("on_phase_start")
 
     def _audit(self, event_type: str, actor_id: str, payload: dict) -> None:
+        if event_type == "agent_speech" and isinstance(payload, dict):
+            phase = str(payload.get("phase") or "")
+            if phase == Phase.DAY_DISCUSS.value:
+                content = str(payload.get("content") or "").strip()
+                if content:
+                    sanitized_payload = dict(payload)
+                    sanitized_payload["content"] = self._sanitize_public_day_discuss_content(content)
+                    payload = sanitized_payload
+
         self.snapshot.action_audit_log.append(
             {
                 "ts": datetime.utcnow().isoformat(),
@@ -587,6 +619,27 @@ class GameEngine:
                 "payload": payload,
             }
         )
+
+    @staticmethod
+    def _sanitize_public_day_discuss_content(text: str) -> str:
+        speech = str(text or "").strip()
+        if not speech:
+            return speech
+
+        replacements = [
+            ("暴露狼人身份", "暴露真实身份"),
+            ("狼人身份", "真实身份"),
+            ("（狼人）", "（疑似狼人）"),
+            ("是狼人", "疑似狼人"),
+            ("就是狼人", "疑似狼人"),
+            ("为狼人", "疑似狼人"),
+            ("必是狼人", "疑似狼人"),
+        ]
+        for src, dst in replacements:
+            speech = speech.replace(src, dst)
+
+        speech = re.sub(r"\b狼(?:人)?阵营\b", "对立阵营", speech)
+        return speech
 
     def _find_alive_role(self, role: Role) -> Optional[PlayerState]:
         for player in self.snapshot.players.values():
@@ -732,7 +785,7 @@ class GameEngine:
                 pid: cause.value
                 for pid, cause in self.snapshot.round_context.deaths_this_round.items()
             },
-            "speech_history": speech_history[-30:],
+            "speech_history": speech_history[-self.PUBLIC_SPEECH_HISTORY_LIMIT :],
             "is_peace_night": self.snapshot.phase in {Phase.DAY_ANNOUNCE, Phase.DAY_DISCUSS, Phase.DAY_VOTE}
             and not self.snapshot.round_context.deaths_this_round,
         }

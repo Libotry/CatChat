@@ -24,8 +24,21 @@ class _FakeScheduler:
         self.calls.append(_CallRecord(player_id=str(player_id), history_len=len(history)))
         return {
             "action": {"target": None},
-            "reasoning": f"wolf discuss from {player_id}",
+            "reasoning": f"wolf discuss from {player_id}，我建议今晚击杀 P3。",
         }
+
+
+class _TwoRoundConsensusScheduler:
+    def __init__(self) -> None:
+        self.calls = 0
+
+    async def trigger_agent_action(self, **kwargs):
+        self.calls += 1
+        if self.calls == 1:
+            return {"action": {"target": "p8"}, "reasoning": "第一轮我建议先刀 P8。"}
+        if self.calls == 2:
+            return {"action": {"target": "p9"}, "reasoning": "第一轮我建议刀 P9。"}
+        return {"action": {"target": "p8"}, "reasoning": "第二轮统一目标，今晚刀 P8。"}
 
 
 def _make_engine_two_wolves() -> GameEngine:
@@ -90,3 +103,108 @@ def test_ai_god_orchestrator_wolf_discussion_is_sequential() -> None:
     assert len(fake.calls) == 2
     assert fake.calls[0].history_len == 0
     assert fake.calls[1].history_len == 1
+
+
+def _wolf_discuss_lines(engine: GameEngine) -> list[str]:
+    rows = [
+        row
+        for row in engine.snapshot.action_audit_log
+        if row.get("event_type") == "agent_speech"
+        and str((row.get("payload") or {}).get("phase") or "") == "night_wolf_discuss"
+    ]
+    return [str(((row.get("payload") or {}).get("content") or "")).strip() for row in rows]
+
+
+def test_god_orchestrator_wolf_discussion_requires_explicit_target() -> None:
+    engine = _make_engine_two_wolves()
+    fake = _FakeScheduler()
+    orchestrator = GodOrchestrator(scheduler=fake)
+
+    asyncio.run(orchestrator._run_wolf_phase(engine))
+
+    lines = _wolf_discuss_lines(engine)
+    assert len(lines) == 2
+    assert all("暂未确定今晚目标" not in line for line in lines)
+    assert all("暂无目标" not in line for line in lines)
+    assert all("建议今晚击杀" in line for line in lines)
+
+
+def test_ai_god_orchestrator_wolf_discussion_requires_explicit_target() -> None:
+    engine = _make_engine_two_wolves()
+    fake = _FakeScheduler()
+    orchestrator = AIGodOrchestrator(scheduler=fake)
+    god_result = GodNarration(phase="night_wolf", narration="", reasoning="")
+
+    asyncio.run(orchestrator._run_wolf_phase(engine, god_result))
+
+    lines = _wolf_discuss_lines(engine)
+    assert len(lines) == 2
+    assert all("暂未确定今晚目标" not in line for line in lines)
+    assert all("暂无目标" not in line for line in lines)
+    assert all("建议今晚击杀" in line for line in lines)
+
+
+def test_god_orchestrator_wolf_discuss_speech_drops_conflicting_target_text() -> None:
+    engine = _make_engine_two_wolves()
+    orchestrator = GodOrchestrator(scheduler=_FakeScheduler())
+
+    result = {
+        "action": {"target": "p3"},
+        "reasoning": "我建议今晚击杀 P4，这样更稳。",
+    }
+    speech = orchestrator._wolf_discuss_speech_text(engine, result, "p3")
+
+    assert "击杀 P3" in speech
+    assert "P4" not in speech
+
+
+def test_ai_god_orchestrator_wolf_discuss_speech_drops_conflicting_target_text() -> None:
+    engine = _make_engine_two_wolves()
+    orchestrator = AIGodOrchestrator(scheduler=_FakeScheduler())
+
+    result = {
+        "action": {"target": "p3"},
+        "reasoning": "我建议今晚击杀 P4，这样更稳。",
+    }
+    speech = orchestrator._wolf_discuss_speech_text(engine, result, "p3")
+
+    assert "击杀 P3" in speech
+    assert "P4" not in speech
+
+
+def _judge_lines(engine: GameEngine) -> list[str]:
+    rows = [
+        row
+        for row in engine.snapshot.action_audit_log
+        if row.get("event_type") == "agent_speech"
+        and row.get("actor_id") == "god"
+        and str((row.get("payload") or {}).get("phase") or "") == "night_wolf"
+    ]
+    return [str(((row.get("payload") or {}).get("content") or "")).strip() for row in rows]
+
+
+def test_god_orchestrator_wolf_discussion_retries_until_consensus() -> None:
+    engine = _make_engine_two_wolves()
+    fake = _TwoRoundConsensusScheduler()
+    orchestrator = GodOrchestrator(scheduler=fake)
+
+    asyncio.run(orchestrator._run_wolf_phase(engine))
+
+    assert fake.calls == 4
+    lines = _judge_lines(engine)
+    assert any("第1轮讨论未达成一致" in line for line in lines)
+    assert any("第2轮讨论达成一致" in line for line in lines)
+
+
+def test_ai_god_orchestrator_wolf_discussion_retries_until_consensus() -> None:
+    engine = _make_engine_two_wolves()
+    fake = _TwoRoundConsensusScheduler()
+    orchestrator = AIGodOrchestrator(scheduler=fake)
+    god_result = GodNarration(phase="night_wolf", narration="", reasoning="")
+
+    asyncio.run(orchestrator._run_wolf_phase(engine, god_result))
+
+    assert fake.calls == 4
+    lines = _judge_lines(engine)
+    assert any("第1轮讨论未达成一致" in line for line in lines)
+    assert any("第2轮讨论达成一致" in line for line in lines)
