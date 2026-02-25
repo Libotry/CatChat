@@ -200,13 +200,27 @@ def _build_prompt(req: ActRequest) -> str:
     )
 
 
+def _normalize_openai_compatible_url(api_url: str) -> str:
+    url = (api_url or "").strip().rstrip("/")
+    if not url:
+        return ""
+    lower = url.lower()
+    if lower.endswith("/v1/chat/completions") or lower.endswith("/chat/completions"):
+        return url
+    if lower.endswith("/v1"):
+        return url + "/chat/completions"
+    return url + "/v1/chat/completions"
+
+
 def _call_openai_compatible(api_url: str, api_key: str, model_name: str,
                             prompt: str, timeout_sec: int) -> str:
-    """Call OpenAI-compatible API (OpenAI / GLM / SiliconFlow)."""
+    """Call OpenAI-compatible API (OpenAI / GLM / SiliconFlow / relay)."""
+    request_url = _normalize_openai_compatible_url(api_url)
     headers = {
-        "Authorization": f"Bearer {api_key}",
         "Content-Type": "application/json",
     }
+    if api_key:
+        headers["Authorization"] = f"Bearer {api_key}"
     body = {
         "model": model_name,
         "messages": [
@@ -217,7 +231,7 @@ def _call_openai_compatible(api_url: str, api_key: str, model_name: str,
         "max_tokens": 800,
     }
     with httpx.Client(timeout=timeout_sec) as client:
-        resp = client.post(api_url, headers=headers, json=body)
+        resp = client.post(request_url, headers=headers, json=body)
     resp.raise_for_status()
     data = resp.json()
     choices = data.get("choices")
@@ -260,11 +274,13 @@ def _run_api_action(req: ActRequest, cfg: Dict[str, Any]) -> Dict[str, Any]:
     api_key = str(cfg.get("api_key") or "").strip()
     model_name = str(cfg.get("model_name") or MODEL_TYPE).strip()
     timeout_sec = int(cfg.get("api_timeout_sec") or DEFAULT_API_TIMEOUT_SEC)
-
-    if not api_url or not api_key:
-        raise RuntimeError("api_url/api_key 未传入")
-
     provider = _detect_provider(cfg)
+
+    if not api_url:
+        raise RuntimeError("api_url 未传入")
+    if provider == "claude" and not api_key:
+        raise RuntimeError("claude 模式缺少 api_key")
+
     prompt = _build_prompt(req)
     logger.info(
         "[LLM][request] provider=%s model=%s player=%s phase=%s prompt=%s",

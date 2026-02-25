@@ -216,6 +216,10 @@ class GodOrchestrator:
             except ValueError:
                 continue
 
+        wolf_votes = engine.snapshot.round_context.night_actions.wolf_votes
+        for wolf in wolves:
+            wolf_votes[wolf.player_id] = consensus_target
+
     @staticmethod
     def _ordered_wolves_for_discussion(engine: GameEngine) -> list:
         wolves = [p for p in engine.snapshot.players.values() if p.alive and p.role == Role.WEREWOLF]
@@ -410,7 +414,8 @@ class GodOrchestrator:
                 result,
                 default_speech="我先听听大家的意见。",
             )
-            speech_text = self._sanitize_day_discuss_public_speech(speech_text)
+            if player.role != Role.SEER:
+                speech_text = self._sanitize_day_discuss_public_speech(speech_text)
             engine._audit(
                 "agent_speech",
                 player.player_id,
@@ -590,7 +595,6 @@ class GodOrchestrator:
 
         seer_claim_with_check = bool(
             re.search(r"(?:我是|本轮我[是为]?|我身份是)\s*预言家", speech)
-            and re.search(r"昨晚|昨夜|今早|本轮|上轮", speech)
             and re.search(r"查验|验了|验出|金水|查杀", speech)
             and has_explicit_target
         )

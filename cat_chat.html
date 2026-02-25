@@ -247,7 +247,7 @@
         .btn-confirm { flex: 1; padding: 14px; border: none; border-radius: var(--radius-sm); background: linear-gradient(135deg, var(--accent-pink), var(--accent-orange)); color: white; font-size: 14px; font-weight: 600; cursor: pointer; font-family: inherit; box-shadow: 0 4px 12px rgba(245,130,174,0.3); }
         .btn-confirm:hover { transform: translateY(-1px); box-shadow: 0 6px 20px rgba(245,130,174,0.4); }
 
-        .provider-cards { display: grid; grid-template-columns: repeat(4,1fr); gap: 10px; }
+        .provider-cards { display: grid; grid-template-columns: repeat(5,1fr); gap: 10px; }
         .provider-card { display: flex; flex-direction: column; align-items: center; gap: 6px; padding: 14px 8px; border: 2px solid rgba(0,0,0,0.08); border-radius: var(--radius-sm); background: var(--bg-primary); cursor: pointer; transition: all 0.2s; text-align: center; }
         .provider-card:hover { border-color: rgba(0,0,0,0.15); transform: translateY(-1px); }
         .provider-card.selected { border-color: var(--accent-pink); background: rgba(245,130,174,0.06); box-shadow: 0 0 0 3px rgba(245,130,174,0.15); }
@@ -268,6 +268,7 @@
         .provider-badge.claude { background: #d97706; }
         .provider-badge.glm { background: #3b82f6; }
         .provider-badge.siliconflow { background: #7c3aed; }
+        .provider-badge.custom { background: #4b5563; }
 
         .empty-state { flex: 1; display: flex; flex-direction: column; align-items: center; justify-content: center; color: var(--text-secondary); gap: 12px; }
         .empty-state .big-emoji { font-size: 72px; animation: float 3s ease-in-out infinite; }
@@ -545,7 +546,7 @@
         <div class="settings-section" style="padding:16px 20px;">
             <div class="settings-toggle" onclick="toggleGlobalSettings()">⚙️ <span>全局 API 设置</span><span id="settingsArrow" style="margin-left:auto;">▶</span></div>
             <div id="globalSettings" style="display:none;margin-top:12px;">
-                <div class="form-group" style="margin-bottom:10px;"><label>默认 Provider</label><select id="globalProvider"><option value="openai">OpenAI 兼容</option><option value="claude">Claude</option><option value="glm">GLM 智谱</option><option value="siliconflow">硅基流动</option></select></div>
+                <div class="form-group" style="margin-bottom:10px;"><label>默认 Provider</label><select id="globalProvider"><option value="openai">OpenAI 兼容</option><option value="claude">Claude</option><option value="glm">GLM 智谱</option><option value="siliconflow">硅基流动</option><option value="custom">自定义中转站</option></select></div>
                 <div class="form-group" style="margin-bottom:10px;"><label>默认 API Key</label><input type="password" id="globalApiKey" placeholder="填入你的 API Key"/></div>
                 <div class="form-group" style="margin-bottom:0;"><label>默认模型</label><input type="text" id="globalModel" placeholder="gpt-4o-mini / claude-sonnet-4-20250514 / glm-4-flash"/></div>
             </div>
@@ -628,6 +629,7 @@
                     <div class="provider-card" data-provider="claude" onclick="selectProvider('claude')"><div class="provider-icon">🟠</div><div class="provider-label">Claude</div><div class="provider-desc">Anthropic 系列</div></div>
                     <div class="provider-card" data-provider="glm" onclick="selectProvider('glm')"><div class="provider-icon">🔵</div><div class="provider-label">GLM</div><div class="provider-desc">智谱 ChatGLM</div></div>
                     <div class="provider-card" data-provider="siliconflow" onclick="selectProvider('siliconflow')"><div class="provider-icon">🟣</div><div class="provider-label">硅基流动</div><div class="provider-desc">SiliconFlow</div></div>
+                    <div class="provider-card" data-provider="custom" onclick="selectProvider('custom')"><div class="provider-icon">⚙️</div><div class="provider-label">自定义</div><div class="provider-desc">中转站 URL</div></div>
                 </div>
             </div>
             <div class="api-config-panel">
@@ -635,6 +637,7 @@
                 <div class="form-group"><label>API 地址</label><input type="text" id="catApiUrl"/><div class="hint" id="apiUrlHint"></div></div>
                 <div class="form-group"><label>API Key</label><input type="password" id="catApiKey" placeholder="留空则使用全局设置"/></div>
                 <div class="form-group"><label>模型名称</label><input type="text" id="catModel"/><div class="model-presets" id="modelPresets"></div></div>
+                <div class="form-group" id="customCompatGroup" style="display:none;"><label>兼容格式</label><select id="customCompat" onchange="onCustomCompatChange()"><option value="openai">OpenAI Compatible</option><option value="claude">Claude Messages</option></select><div class="hint">用于告诉系统如何组装请求体与请求头</div></div>
                 <div class="form-group" id="claudeVersionGroup" style="display:none;"><label>API 版本</label><input type="text" id="claudeApiVersion" value="2023-06-01"/><div class="hint">Claude anthropic-version 头部</div></div>
             </div>
             <div class="modal-actions">
@@ -669,6 +672,7 @@
             <div class="form-group"><label>API 地址</label><input type="text" id="editCatApiUrl"/><div class="hint" id="editApiUrlHint"></div></div>
             <div class="form-group"><label>API Key</label><input type="password" id="editCatApiKey" placeholder="留空则使用全局设置"/></div>
             <div class="form-group"><label>模型名称</label><input type="text" id="editCatModel"/><div class="edit-model-presets" id="editModelPresets"></div></div>
+            <div class="form-group" id="editCustomCompatGroup" style="display:none;"><label>兼容格式</label><select id="editCustomCompat" onchange="onEditCustomCompatChange()"><option value="openai">OpenAI Compatible</option><option value="claude">Claude Messages</option></select><div class="hint">用于告诉系统如何组装请求体与请求头</div></div>
             <div class="form-group" id="editClaudeVersionGroup" style="display:none;"><label>API 版本</label><input type="text" id="editClaudeApiVersion"/><div class="hint">Claude anthropic-version 头部</div></div>
             <div class="modal-actions">
                 <button class="btn-cancel" onclick="closeEditCatModal()">取消</button>

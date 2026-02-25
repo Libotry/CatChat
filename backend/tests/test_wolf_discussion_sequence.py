@@ -208,3 +208,28 @@ def test_ai_god_orchestrator_wolf_discussion_retries_until_consensus() -> None:
     lines = _judge_lines(engine)
     assert any("第1轮讨论未达成一致" in line for line in lines)
     assert any("第2轮讨论达成一致" in line for line in lines)
+
+
+def test_god_orchestrator_wolf_consensus_written_to_all_wolf_votes() -> None:
+    engine = _make_engine_two_wolves()
+    fake = _TwoRoundConsensusScheduler()
+    orchestrator = GodOrchestrator(scheduler=fake)
+
+    asyncio.run(orchestrator._run_wolf_phase(engine))
+
+    votes = engine.snapshot.round_context.night_actions.wolf_votes
+    assert votes.get("owner") == "p8"
+    assert votes.get("p2") == "p8"
+
+
+def test_ai_god_orchestrator_wolf_consensus_written_to_all_wolf_votes() -> None:
+    engine = _make_engine_two_wolves()
+    fake = _TwoRoundConsensusScheduler()
+    orchestrator = AIGodOrchestrator(scheduler=fake)
+    god_result = GodNarration(phase="night_wolf", narration="", reasoning="")
+
+    asyncio.run(orchestrator._run_wolf_phase(engine, god_result))
+
+    votes = engine.snapshot.round_context.night_actions.wolf_votes
+    assert votes.get("owner") == "p8"
+    assert votes.get("p2") == "p8"

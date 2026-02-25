@@ -604,9 +604,10 @@ class GameEngine:
     def _audit(self, event_type: str, actor_id: str, payload: dict) -> None:
         if event_type == "agent_speech" and isinstance(payload, dict):
             phase = str(payload.get("phase") or "")
+            role = str(payload.get("role") or "")
             if phase == Phase.DAY_DISCUSS.value:
                 content = str(payload.get("content") or "").strip()
-                if content:
+                if content and role != Role.SEER.value:
                     sanitized_payload = dict(payload)
                     sanitized_payload["content"] = self._sanitize_public_day_discuss_content(content)
                     payload = sanitized_payload
@@ -684,12 +685,18 @@ class GameEngine:
                 continue
 
             if event_type == "god_narration":
+                rulings = payload.get("rulings")
+                if not isinstance(rulings, dict):
+                    rulings = {}
                 speech_history.append(
                     {
                         "player_id": "god",
                         "phase": payload.get("phase") or self.snapshot.phase.value,
                         "role": "judge",
                         "content": payload.get("content", ""),
+                        "phase_instructions": payload.get("phase_instructions", ""),
+                        "rulings": rulings,
+                        "next_phase_hint": payload.get("next_phase_hint", ""),
                         "is_fallback": payload.get("is_fallback", False),
                         "fallback_reason": payload.get("fallback_reason"),
                         "timestamp": row.get("ts"),

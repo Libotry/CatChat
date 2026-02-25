@@ -195,6 +195,9 @@ class WSConnectionManager:
                     continue
                 sanitized = dict(item)
                 sanitized.pop("thought_content", None)
+                if sanitized.get("event") == "god_narration":
+                    sanitized.pop("rulings", None)
+                    sanitized.pop("next_phase_hint", None)
                 sanitized_history.append(sanitized)
             filtered["speech_history"] = sanitized_history
 

@@ -39,16 +39,16 @@ def test_day_discuss_public_speech_still_sanitizes_without_explicit_target() -> 
     assert "疑似狼人" in s2
 
 
-def test_day_discuss_public_speech_still_sanitizes_without_round_time_hint() -> None:
+def test_day_discuss_public_speech_keeps_definitive_claim_without_round_time_hint_when_seer_check_is_explicit() -> None:
     raw = "我查验了折耳，他就是狼人。我是预言家，信息可靠。"
 
     s1 = GodOrchestrator._sanitize_day_discuss_public_speech(raw)
     s2 = AIGodOrchestrator._sanitize_day_discuss_public_speech(raw)
 
-    assert "就是狼人" not in s1
-    assert "疑似狼人" in s1
-    assert "就是狼人" not in s2
-    assert "疑似狼人" in s2
+    assert "就是狼人" in s1
+    assert "疑似狼人" not in s1
+    assert "就是狼人" in s2
+    assert "疑似狼人" not in s2
 
 
 def test_day_discuss_public_speech_sanitizes_wolf_identity_exposure_phrase() -> None:
@@ -80,3 +80,21 @@ def test_engine_audit_applies_day_discuss_identity_sanitize() -> None:
     assert "狼人身份" not in content
     assert "暴露真实身份" in content
     assert "就是狼人" not in content
+
+
+def test_engine_audit_keeps_seer_day_discuss_raw_content() -> None:
+    engine = GameEngine(room_id="r_day_sanitize_seer", owner_id="owner")
+    engine._audit(
+        "agent_speech",
+        "p2",
+        {
+            "phase": "day_discuss",
+            "role": "seer",
+            "content": "我是预言家，我查验了3号，他就是狼人。",
+        },
+    )
+
+    payload = (engine.snapshot.action_audit_log[-1].get("payload") or {})
+    content = str(payload.get("content") or "")
+    assert "就是狼人" in content
+    assert "疑似狼人" not in content

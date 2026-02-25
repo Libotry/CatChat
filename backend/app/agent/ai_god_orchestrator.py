@@ -43,6 +43,18 @@ def _clip_text(text: str, limit: int = LLM_LOG_MAX_CHARS) -> str:
         return text
     return text[:limit] + f" ...[truncated {len(text) - limit} chars]"
 
+
+def _normalize_openai_compatible_url(api_url: str) -> str:
+    url = str(api_url or "").strip().rstrip("/")
+    if not url:
+        return ""
+    lower = url.lower()
+    if lower.endswith("/v1/chat/completions") or lower.endswith("/chat/completions"):
+        return url
+    if lower.endswith("/v1"):
+        return url + "/chat/completions"
+    return url + "/v1/chat/completions"
+
 # ---------------------------------------------------------------------------
 # God-Agent system prompt (injected at every phase call)
 # ---------------------------------------------------------------------------
@@ -114,6 +126,8 @@ class GodNarration:
     phase: str
     narration: str
     reasoning: str
+    phase_instructions: str = ""
+    next_phase_hint: str = ""
     rulings: Dict[str, Any] = field(default_factory=dict)
     raw_response: str = ""
     latency_ms: float = 0.0
@@ -248,11 +262,16 @@ class AIGodOrchestrator:
             raw_text = await self._call_god_llm(user_prompt)
             latency_ms = (time.perf_counter() - start) * 1000
             parsed = self._parse_god_response(raw_text)
+            parsed_rulings = parsed.get("rulings", {})
+            if not isinstance(parsed_rulings, dict):
+                parsed_rulings = {}
             narration = GodNarration(
                 phase=phase_label,
-                narration=parsed.get("narration", ""),
+                narration=self._coerce_public_narration(phase_label, parsed.get("narration", "")),
                 reasoning=parsed.get("reasoning", ""),
-                rulings=parsed.get("rulings", {}),
+                phase_instructions=str(parsed.get("phase_instructions") or "").strip(),
+                next_phase_hint=str(parsed.get("next_phase_hint") or "").strip(),
+                rulings=parsed_rulings,
                 raw_response=raw_text[:2000],
                 latency_ms=latency_ms,
             )
@@ -300,9 +319,11 @@ class AIGodOrchestrator:
 
     async def _call_openai_compatible(self, user_prompt: str) -> str:
         cfg = self.god_config
+        request_url = _normalize_openai_compatible_url(cfg.api_url)
         headers = {
             "Content-Type": "application/json",
             "Authorization": f"Bearer {cfg.api_key}",
+            "x-api-key": cfg.api_key,
         }
         body = {
             "model": cfg.model_name,
@@ -314,10 +335,25 @@ class AIGodOrchestrator:
             ],
         }
         async with httpx.AsyncClient(timeout=cfg.timeout_sec) as client:
-            resp = await client.post(cfg.api_url, headers=headers, json=body)
-        resp.raise_for_status()
-        data = resp.json()
-        return data["choices"][0]["message"]["content"]
+            resp = await client.post(request_url, headers=headers, json=body)
+        if resp.status_code >= 400:
+            detail = ""
+            payload = self._try_parse_json(resp.text or "")
+            if isinstance(payload, dict):
+                err = payload.get("error")
+                if isinstance(err, dict):
+                    detail = str(err.get("message") or err.get("type") or "").strip()
+                elif isinstance(err, str):
+                    detail = err.strip()
+                if not detail:
+                    detail = str(payload.get("detail") or payload.get("message") or "").strip()
+            if not detail:
+                detail = (resp.text or "").strip()[:300]
+            raise RuntimeError(
+                f"openai-compatible http={resp.status_code} url={request_url} detail={detail or 'unknown'}"
+            )
+        raw = resp.text or ""
+        return self._extract_openai_compatible_text(raw)
 
     async def _call_claude(self, user_prompt: str) -> str:
         cfg = self.god_config
@@ -339,8 +375,156 @@ class AIGodOrchestrator:
         async with httpx.AsyncClient(timeout=cfg.timeout_sec) as client:
             resp = await client.post(api_url, headers=headers, json=body)
         resp.raise_for_status()
-        data = resp.json()
-        return data["content"][0]["text"]
+        raw = resp.text or ""
+        return self._extract_claude_text(raw)
+
+    @staticmethod
+    def _try_parse_json(text: str) -> Optional[Dict[str, Any]]:
+        try:
+            data = json.loads(text)
+            return data if isinstance(data, dict) else None
+        except Exception:  # noqa: BLE001
+            return None
+
+    @staticmethod
+    def _content_to_text(content: Any) -> str:
+        if isinstance(content, str):
+            return content.strip()
+        if isinstance(content, dict):
+            text = content.get("text")
+            if isinstance(text, str):
+                return text.strip()
+            return ""
+        if isinstance(content, list):
+            parts: list[str] = []
+            for item in content:
+                if isinstance(item, str):
+                    seg = item.strip()
+                    if seg:
+                        parts.append(seg)
+                    continue
+                if isinstance(item, dict):
+                    text = item.get("text")
+                    if isinstance(text, str) and text.strip():
+                        parts.append(text.strip())
+            return "\n".join(parts).strip()
+        return ""
+
+    @classmethod
+    def _extract_openai_compatible_text(cls, raw: str) -> str:
+        text = str(raw or "").strip()
+        if not text:
+            raise RuntimeError("openai-compatible response is empty")
+
+        data = cls._try_parse_json(text)
+        if isinstance(data, dict):
+            if any(key in data for key in ("narration", "reasoning", "rulings", "phase_instructions")):
+                return json.dumps(data, ensure_ascii=False)
+
+            error_payload = data.get("error")
+            if isinstance(error_payload, dict):
+                message = str(error_payload.get("message") or "").strip() or "unknown error"
+                raise RuntimeError(f"openai-compatible error payload: {message}")
+
+            choices = data.get("choices")
+            if isinstance(choices, list) and choices:
+                first = choices[0] if isinstance(choices[0], dict) else {}
+                msg = first.get("message") if isinstance(first, dict) else {}
+                extracted = cls._content_to_text((msg or {}).get("content"))
+                if extracted:
+                    return extracted
+                extracted = cls._content_to_text((msg or {}).get("reasoning_content"))
+                if extracted:
+                    return extracted
+                extracted = cls._content_to_text(first.get("text") if isinstance(first, dict) else "")
+                if extracted:
+                    return extracted
+                delta = first.get("delta") if isinstance(first, dict) else {}
+                extracted = cls._content_to_text((delta or {}).get("content"))
+                if extracted:
+                    return extracted
+                extracted = cls._content_to_text((delta or {}).get("reasoning_content"))
+                if extracted:
+                    return extracted
+
+            extracted = cls._content_to_text(data.get("output_text"))
+            if extracted:
+                return extracted
+            extracted = cls._content_to_text(data.get("content"))
+            if extracted:
+                return extracted
+            extracted = cls._content_to_text(data.get("response"))
+            if extracted:
+                return extracted
+
+            candidates = data.get("candidates")
+            if isinstance(candidates, list):
+                pieces: list[str] = []
+                for cand in candidates:
+                    if not isinstance(cand, dict):
+                        continue
+                    content = cand.get("content")
+                    if isinstance(content, dict):
+                        parts = content.get("parts")
+                        if isinstance(parts, list):
+                            for part in parts:
+                                if isinstance(part, dict):
+                                    seg = cls._content_to_text(part.get("text"))
+                                    if seg:
+                                        pieces.append(seg)
+                if pieces:
+                    return "\n".join(pieces).strip()
+
+        if "data:" in text:
+            chunks: list[str] = []
+            for line in text.splitlines():
+                row = line.strip()
+                if not row.startswith("data:"):
+                    continue
+                payload = row[5:].strip()
+                if not payload or payload == "[DONE]":
+                    continue
+                chunk_data = cls._try_parse_json(payload)
+                if not isinstance(chunk_data, dict):
+                    continue
+                chunk_text = ""
+                chunk_choices = chunk_data.get("choices")
+                if isinstance(chunk_choices, list) and chunk_choices and isinstance(chunk_choices[0], dict):
+                    c0 = chunk_choices[0]
+                    chunk_text = cls._content_to_text((c0.get("delta") or {}).get("content"))
+                    if not chunk_text:
+                        chunk_text = cls._content_to_text(c0.get("text"))
+                if not chunk_text:
+                    chunk_text = cls._content_to_text(chunk_data.get("output_text"))
+                if chunk_text:
+                    chunks.append(chunk_text)
+            if chunks:
+                return "".join(chunks).strip()
+
+        if len(text) <= 4000:
+            return text
+        raise RuntimeError("openai-compatible response missing text content")
+
+    @classmethod
+    def _extract_claude_text(cls, raw: str) -> str:
+        text = str(raw or "").strip()
+        if not text:
+            raise RuntimeError("claude response is empty")
+        data = cls._try_parse_json(text)
+        if not isinstance(data, dict):
+            raise RuntimeError("claude response is not valid JSON")
+
+        content_blocks = data.get("content")
+        extracted = cls._content_to_text(content_blocks)
+        if extracted:
+            return extracted
+
+        completion = data.get("completion")
+        extracted = cls._content_to_text(completion)
+        if extracted:
+            return extracted
+
+        raise RuntimeError("claude response missing text content")
 
     # ------------------------------------------------------------------
     # God view builder (full state, not perspective-limited)
@@ -401,6 +585,7 @@ class AIGodOrchestrator:
         text = narration.narration or narration.reasoning or ""
         if not text:
             text = self._fallback_narration(narration.phase)
+        text = self._coerce_public_narration(narration.phase, text)
         text = self._sanitize_public_narration(narration.phase, text)
         engine._audit(
             "god_narration",
@@ -408,10 +593,50 @@ class AIGodOrchestrator:
             {
                 "phase": narration.phase,
                 "content": text,
+                "phase_instructions": narration.phase_instructions,
+                "rulings": narration.rulings,
+                "next_phase_hint": narration.next_phase_hint,
                 "is_fallback": narration.is_fallback,
                 "latency_ms": round(narration.latency_ms, 2),
             },
         )
+
+    @classmethod
+    def _coerce_public_narration(cls, phase: str, text: object) -> str:
+        cleaned = str(text or "").strip()
+        if not cleaned:
+            return cls._fallback_narration(phase)
+
+        candidate = cleaned
+        for _ in range(3):
+            try:
+                parsed = json.loads(candidate)
+            except Exception:  # noqa: BLE001
+                break
+
+            if isinstance(parsed, str):
+                candidate = parsed.strip()
+                if not candidate:
+                    return cls._fallback_narration(phase)
+                cleaned = candidate
+                continue
+
+            if isinstance(parsed, dict):
+                narration = str(parsed.get("narration") or "").strip()
+                if narration:
+                    candidate = narration
+                    cleaned = narration
+                    continue
+                phase_inst = str(parsed.get("phase_instructions") or "").strip()
+                if phase_inst:
+                    return phase_inst
+                break
+
+            break
+
+        if re.search(r'"(?:narration|phase_instructions|rulings)"\s*:', cleaned):
+            return cls._fallback_narration(phase)
+        return cleaned
 
     @classmethod
     def _sanitize_public_narration(cls, phase: str, text: str) -> str:
@@ -419,13 +644,24 @@ class AIGodOrchestrator:
         if not cleaned:
             return cls._fallback_narration(phase)
 
-        if str(phase or "").lower() == "day_vote":
-            has_result_claim = bool(
-                re.search(r"投票结果|平票|放逐|出局|得票|票型统计|无人出局", cleaned, flags=re.IGNORECASE)
+        phase_key = str(phase or "").lower()
+        if phase_key == "day_vote":
+            has_vote_result_claim = bool(
+                re.search(r"投票结果|平票|放逐|得票|票型统计", cleaned, flags=re.IGNORECASE)
             )
-            if has_result_claim:
+            if has_vote_result_claim or cls._contains_night_settlement_claim(cleaned):
                 return "进入投票环节，请每位存活玩家明确给出放逐目标。"
         return cleaned
+
+    @staticmethod
+    def _contains_night_settlement_claim(text: str) -> bool:
+        return bool(
+            re.search(
+                r"平安夜|昨夜.*出局|昨晚.*出局|昨夜.*死亡|昨晚.*死亡|无人出局|狼人.*袭击.*(出局|死亡|平安)|出局名单",
+                str(text or ""),
+                flags=re.IGNORECASE,
+            )
+        )
 
     # ------------------------------------------------------------------
     # Phase runners (child agent calls — same pattern as GodOrchestrator
@@ -546,6 +782,10 @@ class AIGodOrchestrator:
                 engine.submit_night_action(wolf.player_id, consensus_target)
             except ValueError:
                 continue
+
+        wolf_votes = engine.snapshot.round_context.night_actions.wolf_votes
+        for wolf in wolves:
+            wolf_votes[wolf.player_id] = consensus_target
 
     @staticmethod
     def _ordered_wolves_for_discussion(engine: GameEngine) -> list:
@@ -745,7 +985,8 @@ class AIGodOrchestrator:
                 result,
                 default_speech="我先听听大家的意见。",
             )
-            speech_text = self._sanitize_day_discuss_public_speech(speech_text)
+            if player.role != Role.SEER:
+                speech_text = self._sanitize_day_discuss_public_speech(speech_text)
             engine._audit(
                 "agent_speech",
                 player.player_id,
@@ -983,7 +1224,6 @@ class AIGodOrchestrator:
 
         seer_claim_with_check = bool(
             re.search(r"(?:我是|本轮我[是为]?|我身份是)\s*预言家", speech)
-            and re.search(r"昨晚|昨夜|今早|本轮|上轮", speech)
             and re.search(r"查验|验了|验出|金水|查杀", speech)
             and has_explicit_target
         )

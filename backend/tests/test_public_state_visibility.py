@@ -82,3 +82,63 @@ def test_player_view_hides_judge_settlement_and_thoughts() -> None:
     assert all(str(item.get("event") or "") != "agent_speech" or str(item.get("player_id") or "") != "god" for item in rows)
     assert any(str(item.get("event") or "") == "god_narration" for item in rows)
     assert all("thought_content" not in item for item in rows if isinstance(item, dict))
+
+
+def test_public_state_keeps_god_narration_metadata() -> None:
+    engine = _started_engine()
+    engine._audit(
+        "god_narration",
+        "god",
+        {
+            "phase": "day_discuss",
+            "content": "进入白天讨论环节，请依次发言。",
+            "phase_instructions": "从1号开始顺序发言。",
+            "rulings": {"kill_targets": ["cat_03"], "vote_result": None},
+            "next_phase_hint": "day_vote",
+        },
+    )
+
+    state = engine.public_state()
+    rows = state.get("speech_history") or []
+    god_rows = [item for item in rows if isinstance(item, dict) and item.get("event") == "god_narration"]
+
+    assert god_rows
+    latest = god_rows[-1]
+    assert latest.get("phase_instructions") == "从1号开始顺序发言。"
+    assert latest.get("next_phase_hint") == "day_vote"
+    assert latest.get("rulings") == {"kill_targets": ["cat_03"], "vote_result": None}
+
+
+def test_player_view_hides_sensitive_god_narration_fields() -> None:
+    state = {
+        "room_id": "r_visibility",
+        "players": [
+            {
+                "player_id": "cat_01",
+                "nickname": "cat_01",
+                "role": "villager",
+                "alive": True,
+                "online": True,
+            }
+        ],
+        "speech_history": [
+            {
+                "player_id": "god",
+                "event": "god_narration",
+                "phase": "night_wolf",
+                "role": "judge",
+                "content": "狼人请行动。",
+                "phase_instructions": "狼人内部沟通并选择目标。",
+                "rulings": {"kill_targets": ["cat_09"]},
+                "next_phase_hint": "night_guard",
+            }
+        ],
+    }
+
+    filtered = WSConnectionManager._filter_state_for_view(state, "player:cat_01", "cat_01")
+    rows = filtered.get("speech_history") or []
+    assert rows
+    first = rows[0]
+    assert first.get("phase_instructions") == "狼人内部沟通并选择目标。"
+    assert "rulings" not in first
+    assert "next_phase_hint" not in first

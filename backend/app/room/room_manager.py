@@ -155,6 +155,7 @@ class RoomManager:
             self.child_agents.stop_room(room_id)
 
         selected_provider = str((selected_god_cat or {}).get("provider") or "").strip().lower()
+        selected_custom_compat = str((selected_god_cat or {}).get("customCompat") or "openai").strip().lower()
         god_api_url = (
             (selected_god_cat or {}).get("apiUrl")
             or monitor_cfg.get("modelApiUrl")
@@ -170,8 +171,23 @@ class RoomManager:
             or monitor_cfg.get("modelName")
             or monitor_cfg.get("godModelName")
         )
-        god_provider = "claude" if selected_provider == "claude" else "openai"
+        god_provider = "claude" if (selected_provider == "claude" or (selected_provider == "custom" and selected_custom_compat == "claude")) else "openai"
         god_temperature = monitor_cfg.get("godTemperature")
+
+        if ai_god:
+            model_lc = str(god_model_name or "").strip().lower()
+            url_lc = str(god_api_url or "").strip().lower()
+            if god_provider == "openai" and "claude" in model_lc:
+                logger.warning(
+                    "[AIGod][config] provider=openai but model looks Claude model=%s url=%s; if relay expects Claude Messages API, set customCompat=claude for god cat",
+                    god_model_name,
+                    god_api_url,
+                )
+            if god_provider == "claude" and ("/chat/completions" in url_lc):
+                logger.warning(
+                    "[AIGod][config] provider=claude but URL looks OpenAI endpoint url=%s; expected Anthropic Messages endpoint",
+                    god_api_url,
+                )
 
         if ai_god:
             if selected_god_cat is None:
@@ -590,12 +606,15 @@ class RoomManager:
                 raise ValueError(f"bootstrap endpoint missing for player: {player_id}")
 
             cat_cfg = cats[idx] if idx < len(cats) and isinstance(cats[idx], dict) else {}
+            cat_provider = str(cat_cfg.get("provider") or model_type).strip().lower()
+            cat_custom_compat = str(cat_cfg.get("customCompat") or "openai").strip().lower()
+            resolved_model_type = "claude" if (cat_provider == "claude" or (cat_provider == "custom" and cat_custom_compat == "claude")) else cat_provider
             player_configs.append(
                 {
                     "player_id": player_id,
                     "endpoint": endpoint,
                     "nickname": str(cat_cfg.get("name") or room.engine.snapshot.players[player_id].nickname),
-                    "model_type": str(cat_cfg.get("provider") or model_type),
+                    "model_type": str(resolved_model_type or model_type),
                     "api_url": cat_cfg.get("apiUrl") or api_url,
                     "api_key": cat_cfg.get("apiKey") or api_key,
                     "model_name": cat_cfg.get("model") or model_name,

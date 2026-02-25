@@ -19,7 +19,8 @@ const PROVIDERS = {
     openai: { name:'OpenAI',icon:'🟢',defaultUrl:'https://api.openai.com/v1/chat/completions',urlHint:'支持所有 OpenAI 兼容接口',models:['gpt-4o','gpt-4o-mini','gpt-4-turbo','gpt-3.5-turbo','deepseek-chat','qwen-turbo'],defaultModel:'gpt-4o-mini',badgeClass:'openai' },
     claude: { name:'Claude',icon:'🟠',defaultUrl:'https://api.anthropic.com/v1/messages',urlHint:'Anthropic 官方或代理地址',models:['claude-sonnet-4-20250514','claude-haiku-4-20250414','claude-3-5-sonnet-20241022','claude-3-opus-20240229'],defaultModel:'claude-sonnet-4-20250514',badgeClass:'claude' },
     glm: { name:'GLM',icon:'🔵',defaultUrl:'https://open.bigmodel.cn/api/paas/v4/chat/completions',urlHint:'智谱 AI 开放平台',models:['glm-4-plus','glm-4-flash','glm-4-air','glm-4-long','glm-4'],defaultModel:'glm-4-flash',badgeClass:'glm' },
-    siliconflow: { name:'硅基流动',icon:'🟣',defaultUrl:'https://api.siliconflow.cn/v1/chat/completions',urlHint:'SiliconFlow OpenAI 兼容接口',models:['Pro/zai-org/GLM-4.7','deepseek-ai/DeepSeek-V3','Qwen/Qwen2.5-72B-Instruct','THUDM/glm-4-9b-chat'],defaultModel:'Pro/zai-org/GLM-4.7',badgeClass:'siliconflow' }
+    siliconflow: { name:'硅基流动',icon:'🟣',defaultUrl:'https://api.siliconflow.cn/v1/chat/completions',urlHint:'SiliconFlow OpenAI 兼容接口',models:['Pro/zai-org/GLM-4.7','deepseek-ai/DeepSeek-V3','Qwen/Qwen2.5-72B-Instruct','THUDM/glm-4-9b-chat'],defaultModel:'Pro/zai-org/GLM-4.7',badgeClass:'siliconflow' },
+    custom: { name:'自定义中转',icon:'⚙️',defaultUrl:'',urlHint:'填写你的中转站完整 URL（不自动补全路径）',models:[],defaultModel:'custom-model',badgeClass:'custom' }
 };
 const WEREWOLF_ROLES = [
     { id:'werewolf',name:'狼人',icon:'🐺',team:'wolf',desc:'每晚可以选择猎杀一名玩家' },
@@ -39,6 +40,7 @@ const WEREWOLF_BACKEND_AUTO_ADVANCE_DELAY_MS = 1200;
 // ====================== State ======================
 let cats = [], messages = [];
 let selectedEmoji = '🐱', selectedColor = '#f582ae', selectedProvider = 'openai';
+let selectedCustomCompat = 'openai';
 let selectedAvatarUrl = '';
 let selectedBreed = CAT_BREED_AVATARS[0].breed;
 let gameMode = 'discuss', judgeView = true;
@@ -913,6 +915,7 @@ function normalizeImportedCats(rawCats, startIndex) {
             color: c.color || '#f582ae',
             personality: c.personality || '',
             provider: c.provider,
+            customCompat: c.customCompat || 'openai',
             apiUrl: c.apiUrl || cfg.defaultUrl,
             apiKey: c.apiKey || '',
             model: c.model || cfg.defaultModel,
@@ -935,6 +938,7 @@ function monitorProfilePayload() {
                 color: c.color,
                 personality: c.personality,
                 provider: c.provider,
+                customCompat: c.customCompat,
                 apiUrl: c.apiUrl,
                 apiKey: c.apiKey,
                 model: c.model,
@@ -1292,16 +1296,23 @@ function selectColor(color, el) {
 function selectProvider(p) {
     selectedProvider = p;
     document.querySelectorAll('.provider-card').forEach(function(c) { c.classList.remove('selected'); });
-    document.querySelector('.provider-card[data-provider="' + p + '"]').classList.add('selected');
+    var card = document.querySelector('.provider-card[data-provider="' + p + '"]');
+    if (card) card.classList.add('selected');
     updateProviderUI(p);
 }
 function updateProviderUI(p) {
-    var cfg = PROVIDERS[p];
+    var cfg = PROVIDERS[p] || PROVIDERS.openai;
     document.getElementById('apiPanelTitle').innerHTML = cfg.icon + ' ' + cfg.name + ' 接口配置';
     var u = document.getElementById('catApiUrl');
     u.placeholder = cfg.defaultUrl;
     u.value = '';
-    document.getElementById('apiUrlHint').textContent = cfg.urlHint;
+    var urlHint = cfg.urlHint;
+    if (p === 'custom') {
+        urlHint = (selectedCustomCompat === 'claude')
+            ? 'Claude 兼容：可填基础地址，系统会补全到 /v1/messages'
+            : 'OpenAI 兼容：可填基础地址，系统会补全到 /v1/chat/completions';
+    }
+    document.getElementById('apiUrlHint').textContent = urlHint;
     var m = document.getElementById('catModel');
     m.placeholder = cfg.defaultModel;
     m.value = '';
@@ -1310,7 +1321,31 @@ function updateProviderUI(p) {
         return '<button class="model-preset-btn" onclick="document.getElementById(\'catModel\').value=\'' + m + '\'">' + m + '</button>';
     }).join('');
     pr.style.display = cfg.models.length ? 'flex' : 'none';
-    document.getElementById('claudeVersionGroup').style.display = (p === 'claude') ? 'block' : 'none';
+    var isCustom = (p === 'custom');
+    var customGroup = document.getElementById('customCompatGroup');
+    if (customGroup) customGroup.style.display = isCustom ? 'block' : 'none';
+    var isClaudeLike = (p === 'claude') || (isCustom && selectedCustomCompat === 'claude');
+    document.getElementById('claudeVersionGroup').style.display = isClaudeLike ? 'block' : 'none';
+}
+
+function onCustomCompatChange() {
+    var selectEl = document.getElementById('customCompat');
+    selectedCustomCompat = (selectEl && selectEl.value === 'claude') ? 'claude' : 'openai';
+    if (selectedProvider === 'custom') {
+        var urlInput = document.getElementById('catApiUrl');
+        var modelInput = document.getElementById('catModel');
+        var keepUrl = urlInput ? urlInput.value : '';
+        var keepModel = modelInput ? modelInput.value : '';
+        updateProviderUI('custom');
+        if (urlInput) urlInput.value = keepUrl;
+        if (modelInput) modelInput.value = keepModel;
+    }
+}
+
+function catUsesClaudeFormat(cat) {
+    if (!cat) return false;
+    if (cat.provider === 'claude') return true;
+    return cat.provider === 'custom' && String(cat.customCompat || 'openai').toLowerCase() === 'claude';
 }
 
 // ====================== Mode ======================
@@ -1698,7 +1733,7 @@ function debateTriggerCatResponse(cat, chatPayload) {
             setTimeout(function() { debateTriggerNextSpeaker(); }, 1500);
         }
     };
-    if (cat.provider === 'claude') {
+    if (catUsesClaudeFormat(cat)) {
         callClaudeAPI(cat, chatPayload).then(done).catch(fail);
     } else {
         callOpenAIAPI(cat, chatPayload).then(done).catch(fail);
@@ -1779,7 +1814,7 @@ function triggerPipelineCatResponse(cat, chatPayload, phase) {
         addCatMessage(cat, '😿 喵呜...连接出了问题：' + msg, false);
         console.error('[' + cat.name + '] Pipeline API Error:', err);
     };
-    if (cat.provider === 'claude') {
+    if (catUsesClaudeFormat(cat)) {
         callClaudeAPI(cat, chatPayload).then(done).catch(fail);
     } else {
         callOpenAIAPI(cat, chatPayload).then(done).catch(fail);
@@ -1885,6 +1920,9 @@ function resetForm() {
     var avatarFileInput = document.getElementById('catAvatarFile');
     if (avatarFileInput) avatarFileInput.value = '';
     document.getElementById('claudeApiVersion').value = '2023-06-01';
+    var customCompatEl = document.getElementById('customCompat');
+    if (customCompatEl) customCompatEl.value = 'openai';
+    selectedCustomCompat = 'openai';
     selectedEmoji = CAT_BREED_AVATARS[0].icon;
     selectedAvatarUrl = '';
     selectedBreed = CAT_BREED_AVATARS[0].breed;
@@ -1901,8 +1939,15 @@ function resetForm() {
 }
 
 // ====================== Add / Remove Cat ======================
-function normalizeApiUrl(url, provider) {
+function normalizeApiUrl(url, provider, customCompat) {
     if (!url) return '';
+    if (provider === 'custom') {
+        var compat = String(customCompat || 'openai').toLowerCase();
+        if (compat === 'claude') {
+            return normalizeClaudeRequestUrl(url);
+        }
+        return normalizeOpenAICompatibleRequestUrl(url);
+    }
     // Remove trailing slash
     url = url.replace(/\/+$/, '');
     // If the URL already contains the expected path, return as-is
@@ -1919,15 +1964,43 @@ function normalizeApiUrl(url, provider) {
     return url;
 }
 
+function normalizeOpenAICompatibleRequestUrl(url) {
+    var u = String(url || '').trim();
+    if (!u) return '';
+    u = u.replace(/\/+$/, '');
+    if (/\/v1\/chat\/completions$/i.test(u) || /\/chat\/completions$/i.test(u)) {
+        return u;
+    }
+    if (/\/v1$/i.test(u)) {
+        return u + '/chat/completions';
+    }
+    return u + '/v1/chat/completions';
+}
+
+function normalizeClaudeRequestUrl(url) {
+    var u = String(url || '').trim();
+    if (!u) return '';
+    u = u.replace(/\/+$/, '');
+    if (/\/v1\/messages$/i.test(u) || /\/messages$/i.test(u)) {
+        return u;
+    }
+    if (/\/v1$/i.test(u)) {
+        return u + '/messages';
+    }
+    return u + '/v1/messages';
+}
+
 function addCat() {
     var name = document.getElementById('catName').value.trim();
     if (!name) { showToast('⚠️ 请给猫猫取个名字！'); return; }
     var gKey = document.getElementById('globalApiKey').value.trim();
     var gModel = document.getElementById('globalModel').value.trim();
     var provider = selectedProvider;
-    var cfg = PROVIDERS[provider];
+    var cfg = PROVIDERS[provider] || PROVIDERS.openai;
     var rawUrl = document.getElementById('catApiUrl').value.trim();
-    var apiUrl = rawUrl ? normalizeApiUrl(rawUrl, provider) : cfg.defaultUrl;
+    if (provider === 'custom' && !rawUrl) { showToast('⚠️ 自定义中转模式请填写中转站 URL'); return; }
+    var customCompat = (document.getElementById('customCompat') || {}).value || selectedCustomCompat || 'openai';
+    var apiUrl = rawUrl ? normalizeApiUrl(rawUrl, provider, customCompat) : cfg.defaultUrl;
     var customAvatarUrl = document.getElementById('catAvatarUrl').value.trim();
     var cat = {
         id: Date.now().toString(),
@@ -1938,13 +2011,14 @@ function addCat() {
         color: selectedColor,
         personality: document.getElementById('catPersonality').value.trim() || '你是一只叫"' + name + '"的猫咪。用猫咪口吻说话，适当加入"喵"等语气词。你有自己的想法和情绪。',
         provider: provider,
+        customCompat: provider === 'custom' ? customCompat : undefined,
         apiUrl: apiUrl,
         apiKey: document.getElementById('catApiKey').value.trim() || gKey || '',
         model: document.getElementById('catModel').value.trim() || gModel || cfg.defaultModel,
         claudeVersion: document.getElementById('claudeApiVersion').value.trim() || '2023-06-01',
         badgeClass: cfg.badgeClass
     };
-    if (!cat.apiKey) { showToast('⚠️ 请填写 API Key（可在全局设置中配置）'); return; }
+    if (!cat.apiKey && !(provider === 'custom' && customCompat !== 'claude')) { showToast('⚠️ 请填写 API Key（可在全局设置中配置）'); return; }
     cats.push(cat);
     monitorSyncPlayerCountFromCats();
     renderMembers();
@@ -1986,6 +2060,7 @@ function renderMembers() {
     var judgeRole = (gameMode === 'werewolf') ? ' <span class="role-badge" style="background:#f39c12;color:white;">⚖️ 法官</span>' : '';
     var html = '<div class="member-card"><div class="member-avatar" style="background:linear-gradient(135deg,#ffd803,#ff8c42);">🧑</div><div class="member-status"></div><div class="member-info"><div class="member-name">铲屎官</div><div class="member-role">主人 · 在线' + judgeRole + '</div></div></div>';
     cats.forEach(function(cat) {
+        var providerCfg = PROVIDERS[cat.provider] || PROVIDERS.openai;
         var isOnline = catOnlineState(cat);
         var statusClass = isOnline ? '' : ' offline';
         var statusText = isOnline ? '在线' : '离线';
@@ -2008,7 +2083,7 @@ function renderMembers() {
             if (plState.roles.reviewer && plState.roles.reviewer.id === cat.id) roleHtml = ' <span class="pp-role-tag pp-role-review">🔍 检视</span>';
             if (plState.roles.tester && plState.roles.tester.id === cat.id) roleHtml = ' <span class="pp-role-tag pp-role-test">🧪 测试</span>';
         }
-        html += '<div class="member-card"><div class="member-avatar" style="background:linear-gradient(135deg,' + cat.color + ',' + adjustColor(cat.color, -20) + ');" onmouseenter="showCatTooltip(\'' + cat.id + '\',event)" onmouseleave="hideCatTooltip()">' + catAvatarHtml(cat) + '</div><div class="member-status' + statusClass + '"></div><div class="member-info"><div class="member-name">' + escapeHtml(cat.name) + '</div><div class="member-role"><span class="provider-badge ' + cat.badgeClass + '">' + PROVIDERS[cat.provider].icon + ' ' + cat.model + '</span> <span style="font-size:11px;color:rgba(0,0,0,0.45);">' + escapeHtml(cat.breed || '家猫') + '</span> <span style="font-size:11px;color:' + (isOnline ? '#10b981' : '#9ca3af') + ';">' + statusText + '</span>' + roleHtml + '</div></div><button class="member-remove" onclick="removeCat(\'' + cat.id + '\')" title="移除">✕</button></div>';
+        html += '<div class="member-card"><div class="member-avatar" style="background:linear-gradient(135deg,' + cat.color + ',' + adjustColor(cat.color, -20) + ');" onmouseenter="showCatTooltip(\'' + cat.id + '\',event)" onmouseleave="hideCatTooltip()">' + catAvatarHtml(cat) + '</div><div class="member-status' + statusClass + '"></div><div class="member-info"><div class="member-name">' + escapeHtml(cat.name) + '</div><div class="member-role"><span class="provider-badge ' + cat.badgeClass + '">' + providerCfg.icon + ' ' + cat.model + '</span> <span style="font-size:11px;color:rgba(0,0,0,0.45);">' + escapeHtml(cat.breed || '家猫') + '</span> <span style="font-size:11px;color:' + (isOnline ? '#10b981' : '#9ca3af') + ';">' + statusText + '</span>' + roleHtml + '</div></div><button class="member-remove" onclick="removeCat(\'' + cat.id + '\')" title="移除">✕</button></div>';
     });
     list.innerHTML = html;
 }
@@ -2241,24 +2316,29 @@ function triggerCatResponse(cat, chatPayload, isNight) {
         addCatMessage(cat, '😿 喵呜...连接出了问题：' + msg, false);
         console.error('[' + cat.name + '] API Error:', err);
     };
-    if (cat.provider === 'claude') {
+    if (catUsesClaudeFormat(cat)) {
         callClaudeAPI(cat, chatPayload).then(done).catch(fail);
     } else {
         callOpenAIAPI(cat, chatPayload).then(done).catch(fail);
     }
 }
 
-// ---- OpenAI / GLM (both use OpenAI-compatible format) ----
+// ---- OpenAI-compatible / 自定义中转 ----
 function callOpenAIAPI(cat, payload) {
+    var requestUrl = normalizeOpenAICompatibleRequestUrl(cat.apiUrl);
     var body = {
         model: cat.model,
         messages: [{ role:'system', content:payload.system }].concat(payload.messages),
         max_tokens: 300,
         temperature: 0.85
     };
-    return proxyFetch(cat.apiUrl, {
+    var headers = { 'Content-Type':'application/json' };
+    if ((cat.apiKey || '').trim()) {
+        headers.Authorization = 'Bearer ' + cat.apiKey;
+    }
+    return proxyFetch(requestUrl, {
         method: 'POST',
-        headers: { 'Content-Type':'application/json', 'Authorization':'Bearer ' + cat.apiKey },
+        headers: headers,
         body: JSON.stringify(body)
     }).then(function(response) {
         if (!response.ok) {
@@ -2272,12 +2352,22 @@ function callOpenAIAPI(cat, payload) {
 
 // ---- Claude (Anthropic Messages API) ----
 function callClaudeAPI(cat, payload) {
+    var requestUrl = normalizeClaudeRequestUrl(cat.apiUrl);
+    function sanitizeJsonText(value) {
+        var input = String(value == null ? '' : value);
+        input = input.replace(/[\u0000-\u0008\u000B\u000C\u000E-\u001F]/g, ' ');
+        input = input.replace(/[\uD800-\uDBFF](?![\uDC00-\uDFFF])/g, '�');
+        input = input.replace(/(?<![\uD800-\uDBFF])[\uDC00-\uDFFF]/g, '�');
+        return input;
+    }
+
     var merged = [];
     payload.messages.forEach(function(m) {
+        var msgContent = sanitizeJsonText(m.content || '');
         if (merged.length > 0 && merged[merged.length - 1].role === m.role) {
-            merged[merged.length - 1].content += '\n' + m.content;
+            merged[merged.length - 1].content += '\n' + msgContent;
         } else {
-            merged.push({ role:m.role, content:m.content });
+            merged.push({ role:m.role, content:msgContent });
         }
     });
     if (merged.length === 0 || merged[0].role !== 'user') {
@@ -2292,21 +2382,51 @@ function callClaudeAPI(cat, payload) {
         final.push(m);
         lastRole = m.role;
     });
-    var body = { model:cat.model, max_tokens:300, system:payload.system, messages:final };
-    return proxyFetch(cat.apiUrl, {
-        method: 'POST',
-        headers: {
+    function sendClaudeRequest(useBlocks) {
+        var headers = {
             'Content-Type':'application/json',
             'x-api-key': cat.apiKey,
             'anthropic-version': cat.claudeVersion || '2023-06-01',
             'anthropic-dangerous-direct-browser-access':'true'
-        },
-        body: JSON.stringify(body)
-    }).then(function(response) {
+        };
+
+        var reqMessages = final.map(function(m) {
+            if (!useBlocks) return m;
+            return {
+                role: m.role,
+                content: [{ type: 'text', text: sanitizeJsonText(m.content || '') }]
+            };
+        });
+        var body = {
+            model: cat.model,
+            max_tokens: 300,
+            system: sanitizeJsonText(payload.system || ''),
+            messages: reqMessages
+        };
+        return proxyFetch(requestUrl, {
+            method: 'POST',
+            headers: headers,
+            body: JSON.stringify(body)
+        });
+    }
+
+    function parseClaudeResponse(response) {
         if (!response.ok) {
-            return response.text().then(function(t) { throw new Error('Claude (' + response.status + '): ' + t.substring(0, 120)); });
+            return response.text().then(function(t) {
+                var err = new Error('Claude (' + response.status + '): ' + t.substring(0, 220));
+                err.statusCode = response.status;
+                err.rawText = t || '';
+                throw err;
+            });
         }
         return response.json();
+    }
+
+    return sendClaudeRequest(false).then(parseClaudeResponse).catch(function(err) {
+        var raw = String(err && err.rawText || '');
+        var shouldRetry = Number(err && err.statusCode) === 400 && /Invalid JSON|invalid json|request body/i.test(raw);
+        if (!shouldRetry) throw err;
+        return sendClaudeRequest(true).then(parseClaudeResponse);
     }).then(function(data) {
         if (data.content && Array.isArray(data.content)) {
             return data.content.filter(function(b) { return b.type === 'text'; }).map(function(b) { return b.text; }).join('\n').trim();
@@ -3229,6 +3349,7 @@ function exportCats() {
                 color: c.color,
                 personality: c.personality,
                 provider: c.provider,
+                customCompat: c.customCompat,
                 apiUrl: c.apiUrl,
                 apiKey: c.apiKey,
                 model: c.model,
@@ -3303,7 +3424,12 @@ function showCatTooltip(catId, event) {
     rows += '<div class="tt-row"><span class="tt-label">提供商</span><span class="tt-value">' + (cfg.icon || '') + ' ' + (cfg.name || cat.provider) + '</span></div>';
     rows += '<div class="tt-row"><span class="tt-label">模型</span><span class="tt-value">' + escapeHtml(cat.model) + '</span></div>';
     rows += '<div class="tt-row"><span class="tt-label">API 地址</span><span class="tt-value">' + escapeHtml(cat.apiUrl) + '</span></div>';
+    if (cat.provider === 'custom') {
+        rows += '<div class="tt-row"><span class="tt-label">兼容格式</span><span class="tt-value">' + escapeHtml((cat.customCompat || 'openai').toUpperCase()) + '</span></div>';
+    }
     if (cat.provider === 'claude') {
+        rows += '<div class="tt-row"><span class="tt-label">API 版本</span><span class="tt-value">' + escapeHtml(cat.claudeVersion || '2023-06-01') + '</span></div>';
+    } else if (cat.provider === 'custom' && String(cat.customCompat || '').toLowerCase() === 'claude') {
         rows += '<div class="tt-row"><span class="tt-label">API 版本</span><span class="tt-value">' + escapeHtml(cat.claudeVersion || '2023-06-01') + '</span></div>';
     }
     var personalityPreview = cat.personality.length > 120 ? cat.personality.substring(0, 120) + '…' : cat.personality;
@@ -3334,6 +3460,7 @@ function hideCatTooltipNow() {
 
 // ====================== Edit Cat Modal ======================
 var editCatProvider = 'openai';
+var editCustomCompat = 'openai';
 function openEditCatModal(catId) {
     hideCatTooltipNow();
     var cat = cats.find(function(c) { return c.id === catId; });
@@ -3350,12 +3477,15 @@ function openEditCatModal(catId) {
     document.getElementById('editCatApiKey').value = cat.apiKey;
     document.getElementById('editCatModel').value = cat.model;
     document.getElementById('editClaudeApiVersion').value = cat.claudeVersion || '2023-06-01';
-    editCatProvider = cat.provider;
+    editCustomCompat = (String(cat.customCompat || 'openai').toLowerCase() === 'claude') ? 'claude' : 'openai';
+    var editCompatEl = document.getElementById('editCustomCompat');
+    if (editCompatEl) editCompatEl.value = editCustomCompat;
+    editCatProvider = (PROVIDERS[cat.provider] ? cat.provider : 'openai');
     // Render provider buttons
     var provHtml = '';
     Object.keys(PROVIDERS).forEach(function(k) {
         var p = PROVIDERS[k];
-        provHtml += '<button class="edit-prov-btn ' + (k === cat.provider ? 'selected' : '') + '" data-prov="' + k + '" onclick="editSelectProvider(\'' + k + '\')">' + p.icon + ' ' + p.name + '</button>';
+        provHtml += '<button class="edit-prov-btn ' + (k === editCatProvider ? 'selected' : '') + '" data-prov="' + k + '" onclick="editSelectProvider(\'' + k + '\')">' + p.icon + ' ' + p.name + '</button>';
     });
     document.getElementById('editProviderCards').innerHTML = provHtml;
     updateEditProviderUI(cat.provider);
@@ -3368,16 +3498,33 @@ function editSelectProvider(p) {
     updateEditProviderUI(p);
 }
 function updateEditProviderUI(p) {
-    var cfg = PROVIDERS[p];
+    var cfg = PROVIDERS[p] || PROVIDERS.openai;
     document.getElementById('editCatApiUrl').placeholder = cfg.defaultUrl;
-    document.getElementById('editApiUrlHint').textContent = cfg.urlHint;
+    var urlHint = cfg.urlHint;
+    if (p === 'custom') {
+        urlHint = (editCustomCompat === 'claude')
+            ? 'Claude 兼容：可填基础地址，系统会补全到 /v1/messages'
+            : 'OpenAI 兼容：可填基础地址，系统会补全到 /v1/chat/completions';
+    }
+    document.getElementById('editApiUrlHint').textContent = urlHint;
     document.getElementById('editCatModel').placeholder = cfg.defaultModel;
     var pr = document.getElementById('editModelPresets');
     pr.innerHTML = cfg.models.map(function(m) {
         return '<button class="edit-preset-btn" onclick="document.getElementById(\'editCatModel\').value=\'' + m + '\';">' + m + '</button>';
     }).join('');
     pr.style.display = cfg.models.length ? 'flex' : 'none';
-    document.getElementById('editClaudeVersionGroup').style.display = (p === 'claude') ? 'block' : 'none';
+    var isCustom = (p === 'custom');
+    var customGroup = document.getElementById('editCustomCompatGroup');
+    if (customGroup) customGroup.style.display = isCustom ? 'block' : 'none';
+    var isClaudeLike = (p === 'claude') || (isCustom && editCustomCompat === 'claude');
+    document.getElementById('editClaudeVersionGroup').style.display = isClaudeLike ? 'block' : 'none';
+}
+function onEditCustomCompatChange() {
+    var selectEl = document.getElementById('editCustomCompat');
+    editCustomCompat = (selectEl && selectEl.value === 'claude') ? 'claude' : 'openai';
+    if (editCatProvider === 'custom') {
+        updateEditProviderUI('custom');
+    }
 }
 function closeEditCatModal() {
     document.getElementById('editCatModal').classList.remove('active');
@@ -3389,15 +3536,17 @@ function saveEditCat() {
     var name = document.getElementById('editCatName').value.trim();
     if (!name) { showToast('⚠️ 名字不能为空！'); return; }
     var provider = editCatProvider;
-    var cfg = PROVIDERS[provider];
+    var cfg = PROVIDERS[provider] || PROVIDERS.openai;
     var rawUrl = document.getElementById('editCatApiUrl').value.trim();
-    var apiUrl = rawUrl ? normalizeApiUrl(rawUrl, provider) : cfg.defaultUrl;
+    if (provider === 'custom' && !rawUrl) { showToast('⚠️ 自定义中转模式请填写中转站 URL'); return; }
+    var customCompat = (document.getElementById('editCustomCompat') || {}).value || editCustomCompat || 'openai';
+    var apiUrl = rawUrl ? normalizeApiUrl(rawUrl, provider, customCompat) : cfg.defaultUrl;
     var apiKey = document.getElementById('editCatApiKey').value.trim();
     if (!apiKey) {
         var gKey = document.getElementById('globalApiKey').value.trim();
         apiKey = gKey || '';
     }
-    if (!apiKey) { showToast('⚠️ 请填写 API Key'); return; }
+    if (!apiKey && !(provider === 'custom' && customCompat !== 'claude')) { showToast('⚠️ 请填写 API Key'); return; }
     var editedBreed = document.getElementById('editCatBreed').value.trim();
     var editedAvatarUrl = document.getElementById('editCatAvatarUrl').value.trim();
     cat.name = name;
@@ -3411,6 +3560,7 @@ function saveEditCat() {
     }
     cat.personality = document.getElementById('editCatPersonality').value.trim() || cat.personality;
     cat.provider = provider;
+    cat.customCompat = provider === 'custom' ? customCompat : undefined;
     cat.apiUrl = apiUrl;
     cat.apiKey = document.getElementById('editCatApiKey').value.trim() || document.getElementById('globalApiKey').value.trim() || '';
     cat.model = document.getElementById('editCatModel').value.trim() || cfg.defaultModel;
@@ -3455,6 +3605,7 @@ function monitorValidateCatsForBackend(cfg) {
     if (cfg.cliCommand) return;
     var missing = monitorPlayableCats().filter(function(cat) {
         var key = (cat.apiKey || '').trim() || (document.getElementById('globalApiKey').value || '').trim();
+        if (cat.provider === 'custom' && String(cat.customCompat || 'openai').toLowerCase() !== 'claude') return false;
         return !key;
     });
     if (missing.length > 0) {
