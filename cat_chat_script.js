@@ -3406,6 +3406,287 @@ function importCatsFile(event) {
     event.target.value = '';
 }
 
+// ====================== Export Chat Data ======================
+function exportChatData() {
+    var chatEl = document.getElementById('chatMessages');
+    var msgEls = chatEl ? chatEl.querySelectorAll('.message') : [];
+    if (msgEls.length === 0) { showToast('⚠️ 没有聊天记录可以导出！'); return; }
+
+    // Collect structured data from DOM
+    var records = [];
+    msgEls.forEach(function(el) {
+        if (el.classList.contains('system-message')) {
+            records.push({ type: 'system', content: el.textContent.trim() });
+        } else if (el.classList.contains('user-message')) {
+            var bubbleEl = el.querySelector('.message-bubble');
+            var timeEl = el.querySelector('.message-time');
+            records.push({
+                type: 'user',
+                sender: '铲屎官',
+                content: bubbleEl ? bubbleEl.textContent.trim() : '',
+                time: timeEl ? timeEl.textContent.trim() : ''
+            });
+        } else if (el.classList.contains('cat-message')) {
+            var senderEl = el.querySelector('.message-sender');
+            var bubbleEl2 = el.querySelector('.message-bubble');
+            var timeEl2 = el.querySelector('.message-time');
+            var realText = bubbleEl2 ? (bubbleEl2.getAttribute('data-real') || bubbleEl2.textContent.trim()) : '';
+            records.push({
+                type: 'cat',
+                sender: senderEl ? senderEl.textContent.trim() : '猫猫',
+                content: realText,
+                time: timeEl2 ? timeEl2.textContent.trim() : '',
+                isNight: el.dataset.wfNight === 'true'
+            });
+        }
+    });
+
+    // Build export object
+    var exportObj = {
+        version: 1,
+        exportTime: new Date().toISOString(),
+        mode: gameMode,
+        messageCount: records.length,
+        participants: cats.map(function(c) { return { name: c.name, breed: c.breed, model: c.model, provider: c.provider }; }),
+        messages: records
+    };
+
+    // Build plain text version
+    var lines = [];
+    lines.push('========== 喵星人AI聊天室 聊天记录 ==========');
+    lines.push('导出时间: ' + new Date().toLocaleString('zh-CN'));
+    lines.push('模式: ' + gameMode);
+    lines.push('参与者: ' + cats.map(function(c) { return c.emoji + c.name; }).join(', '));
+    lines.push('消息数: ' + records.length);
+    lines.push('============================================\n');
+    records.forEach(function(r) {
+        if (r.type === 'system') {
+            lines.push('[系统] ' + r.content);
+        } else {
+            var prefix = r.time ? '[' + r.time + '] ' : '';
+            var nightTag = r.isNight ? ' 🌙' : '';
+            lines.push(prefix + r.sender + nightTag + ': ' + r.content);
+        }
+    });
+    var textContent = lines.join('\n');
+
+    // Ask user for export format
+    var format = confirm('选择导出格式:\n\n点击「确定」导出 JSON 格式（结构化数据，可程序处理）\n点击「取消」导出 TXT 格式（纯文本，方便阅读）') ? 'json' : 'txt';
+
+    var blob, filename;
+    var dateStr = new Date().toISOString().slice(0, 10);
+    if (format === 'json') {
+        blob = new Blob([JSON.stringify(exportObj, null, 2)], { type: 'application/json' });
+        filename = 'catchat_messages_' + dateStr + '.json';
+    } else {
+        blob = new Blob([textContent], { type: 'text/plain;charset=utf-8' });
+        filename = 'catchat_messages_' + dateStr + '.txt';
+    }
+
+    var url = URL.createObjectURL(blob);
+    var a = document.createElement('a');
+    a.href = url;
+    a.download = filename;
+    document.body.appendChild(a);
+    a.click();
+    document.body.removeChild(a);
+    URL.revokeObjectURL(url);
+    showToast('✅ 已导出 ' + records.length + ' 条聊天记录！');
+}
+
+// ====================== Import Chat Data ======================
+function importChatDataClick() {
+    document.getElementById('importChatFile').click();
+}
+
+function importChatDataFile(event) {
+    var file = event.target.files[0];
+    if (!file) return;
+    var reader = new FileReader();
+    reader.onload = function(e) {
+        var content = e.target.result;
+        try {
+            if (file.name.endsWith('.json')) {
+                importChatFromJSON(content);
+            } else if (file.name.endsWith('.txt')) {
+                importChatFromTXT(content);
+            } else {
+                // Try JSON first, fallback to TXT
+                try {
+                    importChatFromJSON(content);
+                } catch (_) {
+                    importChatFromTXT(content);
+                }
+            }
+        } catch (err) {
+            showToast('❌ 解析聊天记录失败：' + err.message);
+        }
+    };
+    reader.readAsText(file);
+    event.target.value = '';
+}
+
+function importChatFromJSON(content) {
+    var data = JSON.parse(content);
+    if (!data.messages || !Array.isArray(data.messages) || data.messages.length === 0) {
+        showToast('❌ 文件格式错误或没有聊天数据！');
+        return;
+    }
+
+    var shouldClear = confirm('导入聊天记录\n\n点击「确定」清空当前聊天后导入\n点击「取消」追加到当前聊天');
+    if (shouldClear) {
+        clearChatArea();
+    }
+
+    var chatEl = document.getElementById('chatMessages');
+    hideEmptyState();
+    var count = 0;
+
+    data.messages.forEach(function(msg) {
+        if (!msg.type || !msg.content) return;
+        count++;
+
+        if (msg.type === 'system') {
+            var d = document.createElement('div');
+            d.className = 'message system-message';
+            d.textContent = msg.content;
+            chatEl.appendChild(d);
+        } else if (msg.type === 'user') {
+            var d = document.createElement('div');
+            d.className = 'message user-message';
+            d.innerHTML = '<div class="message-avatar" style="background:linear-gradient(135deg,#ffd803,#ff8c42);">🧑</div>'
+                + '<div class="message-content">'
+                + '<div class="message-sender">' + escapeHtml(msg.sender || '铲屎官') + '</div>'
+                + '<div class="message-bubble">' + escapeHtml(msg.content) + '</div>'
+                + '<div class="message-time">' + escapeHtml(msg.time || '') + '</div>'
+                + '</div>';
+            chatEl.appendChild(d);
+            messages.push({ role: 'user', name: msg.sender || '铲屎官', content: msg.content });
+        } else if (msg.type === 'cat') {
+            var senderName = msg.sender || '猫猫';
+            // Try to find matching cat for avatar styling
+            var matchCat = cats.find(function(c) { return senderName.indexOf(c.name) !== -1; });
+            var avatarBg = matchCat
+                ? 'background:linear-gradient(135deg,' + matchCat.color + ',' + adjustColor(matchCat.color, -20) + ');'
+                : 'background:linear-gradient(135deg,#a8d8a8,#8bd3dd);';
+            var avatarContent = matchCat ? catAvatarHtml(matchCat) : '🐱';
+            var nightLabel = msg.isNight ? ' 🌙' : '';
+            var nightClass = msg.isNight ? ' message-night' : '';
+
+            var d = document.createElement('div');
+            d.className = 'message cat-message wf-msg' + nightClass;
+            if (msg.isNight) d.dataset.wfNight = 'true';
+            d.innerHTML = '<div class="message-avatar" style="' + avatarBg + '">' + avatarContent + '</div>'
+                + '<div class="message-content">'
+                + '<div class="message-sender">' + escapeHtml(senderName) + nightLabel + '</div>'
+                + '<div class="message-bubble" data-real="' + escapeHtml(msg.content) + '">' + escapeHtml(msg.content) + '</div>'
+                + '<div class="message-time">' + escapeHtml(msg.time || '') + '</div>'
+                + '</div>';
+            chatEl.appendChild(d);
+            messages.push({ role: 'assistant', name: senderName, content: msg.content });
+        }
+    });
+
+    scrollToBottom();
+    var modeStr = data.mode ? ' (模式: ' + data.mode + ')' : '';
+    var timeStr = data.exportTime ? ' 导出于 ' + new Date(data.exportTime).toLocaleString('zh-CN') : '';
+    addSystemMessage('📥 已导入 ' + count + ' 条聊天记录' + modeStr + timeStr);
+    showToast('✅ 成功导入 ' + count + ' 条聊天记录！');
+}
+
+function importChatFromTXT(content) {
+    var lines = content.split(/\r?\n/).filter(function(l) { return l.trim() !== ''; });
+    if (lines.length === 0) {
+        showToast('❌ 文件内容为空！');
+        return;
+    }
+
+    var shouldClear = confirm('导入聊天记录 (TXT)\n\n点击「确定」清空当前聊天后导入\n点击「取消」追加到当前聊天');
+    if (shouldClear) {
+        clearChatArea();
+    }
+
+    var chatEl = document.getElementById('chatMessages');
+    hideEmptyState();
+    var count = 0;
+    var headerPattern = /^=+.*=+$/;
+    var metaPattern = /^(导出时间|模式|参与者|消息数):/;
+    var systemPattern = /^\[系统\]\s*/;
+    var msgPattern = /^(?:\[([^\]]+)\]\s+)?(.+?)( | )*(🌙)?:\s*(.+)$/;
+
+    lines.forEach(function(line) {
+        line = line.trim();
+        if (!line || headerPattern.test(line) || metaPattern.test(line)) return;
+
+        count++;
+        if (systemPattern.test(line)) {
+            var sysText = line.replace(systemPattern, '');
+            var d = document.createElement('div');
+            d.className = 'message system-message';
+            d.textContent = sysText;
+            chatEl.appendChild(d);
+        } else {
+            var m = line.match(msgPattern);
+            if (m) {
+                var time = m[1] || '';
+                var sender = m[2].trim();
+                var isNight = !!m[4];
+                var text = m[5];
+                var isUser = sender === '铲屎官' || sender === '铲屎官 (法官)';
+
+                if (isUser) {
+                    var d = document.createElement('div');
+                    d.className = 'message user-message';
+                    d.innerHTML = '<div class="message-avatar" style="background:linear-gradient(135deg,#ffd803,#ff8c42);">🧑</div>'
+                        + '<div class="message-content">'
+                        + '<div class="message-sender">' + escapeHtml(sender) + '</div>'
+                        + '<div class="message-bubble">' + escapeHtml(text) + '</div>'
+                        + '<div class="message-time">' + escapeHtml(time) + '</div>'
+                        + '</div>';
+                    chatEl.appendChild(d);
+                    messages.push({ role: 'user', name: sender, content: text });
+                } else {
+                    var matchCat = cats.find(function(c) { return sender.indexOf(c.name) !== -1; });
+                    var avatarBg = matchCat
+                        ? 'background:linear-gradient(135deg,' + matchCat.color + ',' + adjustColor(matchCat.color, -20) + ');'
+                        : 'background:linear-gradient(135deg,#a8d8a8,#8bd3dd);';
+                    var avatarContent = matchCat ? catAvatarHtml(matchCat) : '🐱';
+                    var nightClass = isNight ? ' message-night' : '';
+                    var nightLabel = isNight ? ' 🌙' : '';
+
+                    var d = document.createElement('div');
+                    d.className = 'message cat-message wf-msg' + nightClass;
+                    if (isNight) d.dataset.wfNight = 'true';
+                    d.innerHTML = '<div class="message-avatar" style="' + avatarBg + '">' + avatarContent + '</div>'
+                        + '<div class="message-content">'
+                        + '<div class="message-sender">' + escapeHtml(sender) + nightLabel + '</div>'
+                        + '<div class="message-bubble" data-real="' + escapeHtml(text) + '">' + escapeHtml(text) + '</div>'
+                        + '<div class="message-time">' + escapeHtml(time) + '</div>'
+                        + '</div>';
+                    chatEl.appendChild(d);
+                    messages.push({ role: 'assistant', name: sender, content: text });
+                }
+            } else {
+                // Unrecognized line, treat as system message
+                var d = document.createElement('div');
+                d.className = 'message system-message';
+                d.textContent = line;
+                chatEl.appendChild(d);
+            }
+        }
+    });
+
+    scrollToBottom();
+    addSystemMessage('📥 已从 TXT 文件导入 ' + count + ' 条聊天记录');
+    showToast('✅ 成功导入 ' + count + ' 条聊天记录！');
+}
+
+function clearChatArea() {
+    var chatEl = document.getElementById('chatMessages');
+    chatEl.innerHTML = '';
+    messages = [];
+}
+
 // ====================== Cat Tooltip ======================
 var catTooltipEl = null;
 var catTooltipTimer = null;

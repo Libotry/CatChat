@@ -525,7 +525,10 @@
         <div class="import-export-bar">
             <button class="ie-btn" onclick="exportCats()">📤 导出配置</button>
             <button class="ie-btn" onclick="importCatsClick()">📥 导入配置</button>
+            <button class="ie-btn" onclick="exportChatData()">💾 导出聊天</button>
+            <button class="ie-btn" onclick="importChatDataClick()">📂 导入聊天</button>
             <input type="file" id="importCatsFile" accept=".json" style="display:none;" onchange="importCatsFile(event)"/>
+            <input type="file" id="importChatFile" accept=".json,.txt" style="display:none;" onchange="importChatDataFile(event)"/>
         </div>
         <div class="settings-section" style="padding:16px 20px;">
             <div class="settings-toggle" onclick="toggleCliProxy()">🖥️ <span>本地 CLI 代理</span><span class="cli-status" id="cliStatusDot"></span><span id="cliArrow" style="margin-left:auto;">▶</span></div>
@@ -582,6 +585,8 @@
             </div>
             <div style="display:flex;align-items:center;gap:6px;">
                 <button class="judge-toggle" id="judgeToggle" style="display:none;" onclick="toggleJudgeView()">👁 法官视角</button>
+                <button class="member-toggle" id="exportChatBtn" onclick="exportChatData()">💾 导出聊天</button>
+                <button class="member-toggle" id="importChatBtn" onclick="importChatDataClick()">📂 导入聊天</button>
                 <button class="member-toggle active" id="memberToggle" onclick="toggleRightPanel()">👥 成员</button>
             </div>
         </div>
