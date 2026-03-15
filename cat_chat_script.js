@@ -954,6 +954,11 @@ function normalizeImportedCats(rawCats, startIndex) {
     (rawCats || []).forEach(function(c, i) {
         if (!c || !c.name || !c.provider) return;
         var cfg = PROVIDERS[c.provider] || PROVIDERS.openai;
+        var fallbackPort = 3460 + ((idxSeed + i) % 5000);
+        var parsedPort = parseInt(c.pipelineCliPort, 10);
+        if (!Number.isFinite(parsedPort) || parsedPort < 1024 || parsedPort > 65535) {
+            parsedPort = fallbackPort;
+        }
         list.push({
             id: c.id || (Date.now().toString() + '_' + (idxSeed + i)),
             name: c.name,
@@ -969,7 +974,8 @@ function normalizeImportedCats(rawCats, startIndex) {
             model: c.model || cfg.defaultModel,
             claudeVersion: c.claudeVersion || '2023-06-01',
             badgeClass: c.badgeClass || cfg.badgeClass,
-            pipelineSwitchCommand: String(c.pipelineSwitchCommand || '').trim()
+            pipelineSwitchCommand: String(c.pipelineSwitchCommand || '').trim(),
+            pipelineCliPort: parsedPort
         });
     });
     return list;
@@ -993,7 +999,8 @@ function monitorProfilePayload() {
                 model: c.model,
                 claudeVersion: c.claudeVersion,
                 badgeClass: c.badgeClass,
-                pipelineSwitchCommand: String(c.pipelineSwitchCommand || '').trim()
+                pipelineSwitchCommand: String(c.pipelineSwitchCommand || '').trim(),
+                pipelineCliPort: Number(c.pipelineCliPort || 0)
             };
         }),
         monitor_config: {
@@ -1851,6 +1858,150 @@ function debateForceNext() {
 }
 
 // ====================== Pipeline Mode ======================
+function suggestPipelineCliPort() {
+    var used = {};
+    cats.forEach(function(c) {
+        var p = parseInt(c && c.pipelineCliPort, 10);
+        if (Number.isFinite(p)) used[p] = true;
+    });
+    for (var p = 3460; p <= 65535; p++) {
+        if (!used[p]) return p;
+    }
+    return 3460;
+}
+
+function normalizePipelineCliPort(raw, fallback) {
+    var p = parseInt(raw, 10);
+    if (!Number.isFinite(p) || p < 1024 || p > 65535) {
+        return Number(fallback || 3460);
+    }
+    return p;
+}
+
+function syncPipelineCliAgents() {
+    var inputUrlEl = document.getElementById('cliProxyUrl');
+    var proxyUrl = ((inputUrlEl && inputUrlEl.value) ? inputUrlEl.value : cliProxy.url || 'http://localhost:3456').trim().replace(/\/+$/, '') || 'http://localhost:3456';
+    cliProxy.url = proxyUrl;
+
+    var payload = {
+        cats: cats.map(function(cat) {
+            return {
+                catId: String(cat.id || ''),
+                catName: String(cat.name || ''),
+                port: normalizePipelineCliPort(cat.pipelineCliPort, suggestPipelineCliPort()),
+                switchCommand: String(cat.pipelineSwitchCommand || '').trim(),
+                autoResolvePortConflict: true
+            };
+        })
+    };
+
+    return fetch(proxyUrl + '/pipeline/sync', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(payload)
+    }).then(function(response) {
+        if (!response.ok) {
+            return response.text().then(function(t) {
+                throw new Error('同步猫猫 CLI 失败 (' + response.status + '): ' + t.substring(0, 260));
+            });
+        }
+        return response.json();
+    });
+}
+
+function pipelineApplySyncedPorts(syncData) {
+    var agents = (syncData && Array.isArray(syncData.agents)) ? syncData.agents : [];
+    var changed = false;
+    agents.forEach(function(agent) {
+        var catId = String(agent && agent.catId || '');
+        var nextPort = parseInt(agent && agent.port, 10);
+        if (!catId || !Number.isFinite(nextPort)) return;
+        var cat = cats.find(function(c) { return c.id === catId; });
+        if (!cat) return;
+        if (Number(cat.pipelineCliPort) !== Number(nextPort)) {
+            cat.pipelineCliPort = nextPort;
+            changed = true;
+        }
+    });
+    if (changed) {
+        renderMembers();
+        monitorCollectInvokeConfig();
+        monitorPersistConfig();
+        persistCatsToBackendEnv('后端自动修正猫猫 CLI 端口');
+    }
+}
+
+function pipelineRenderCliStatus(syncData, errMsg) {
+    var el = document.getElementById('ppCliStatus');
+    if (!el) return;
+
+    if (errMsg) {
+        el.style.display = 'block';
+        el.innerHTML = '<div style="font-weight:600;margin-bottom:4px;">🐾 猫猫进程状态</div>' +
+            '<div style="color:#fecaca;">❌ ' + escapeHtml(String(errMsg || '同步失败')) + '</div>';
+        return;
+    }
+
+    var agents = (syncData && Array.isArray(syncData.agents)) ? syncData.agents : [];
+    if (!agents.length) {
+        el.style.display = 'none';
+        el.innerHTML = '';
+        return;
+    }
+
+    var lines = [];
+    lines.push('<div style="font-weight:600;margin-bottom:4px;">🐾 猫猫进程状态</div>');
+    agents.forEach(function(a) {
+        var status = String(a.status || 'unknown');
+        var icon = status === 'started' ? '🟢' : (status === 'reused' ? '🔵' : '⚪');
+        var requestedPort = String((a && a.requestedPort) || (a && a.port) || '-');
+        var actualPort = String((a && a.port) || '-');
+        var portLabel = requestedPort === actualPort ? actualPort : (requestedPort + ' → ' + actualPort);
+        lines.push('<div class="pp-step">' +
+            '<span class="pp-step-badge ' + (status === 'started' ? 'pp-step-active' : 'pp-step-done') + '">' + icon + ' ' + escapeHtml(status) + '</span>' +
+            ' ' + escapeHtml(String(a.catName || a.catId || 'cat')) + ' @ ' + escapeHtml(portLabel) +
+            '</div>');
+    });
+    el.style.display = 'block';
+    el.innerHTML = lines.join('');
+}
+
+function pipelineAutoAssignPorts() {
+    if (!cats.length) {
+        showToast('⚠️ 没有可分配端口的猫猫');
+        return;
+    }
+    var base = 3460;
+    cats.forEach(function(cat, idx) {
+        cat.pipelineCliPort = base + idx;
+    });
+    renderMembers();
+    monitorCollectInvokeConfig();
+    monitorPersistConfig();
+    persistCatsToBackendEnv('自动分配猫猫 CLI 端口');
+    showToast('✅ 已自动分配 ' + cats.length + ' 个端口');
+}
+
+function pipelineSyncCliNow() {
+    if (!cats.length) {
+        showToast('⚠️ 请先添加至少 1 只猫猫');
+        return;
+    }
+    addSystemMessage('🔌 正在同步猫猫专属 CLI 进程...', 'pipeline-msg');
+    syncPipelineCliAgents().then(function(syncData) {
+        pipelineApplySyncedPorts(syncData);
+        pipelineRenderCliStatus(syncData, '');
+        var summary = (syncData && Array.isArray(syncData.agents))
+            ? syncData.agents.map(function(a) { return String(a.catName || a.catId || 'cat') + ':' + String(a.port || '-'); }).join(' / ')
+            : '';
+        addSystemMessage('✅ 猫猫进程同步完成' + (summary ? '：' + summary : ''), 'pipeline-msg');
+    }).catch(function(err) {
+        var msg = String(err && err.message || '同步失败');
+        pipelineRenderCliStatus(null, msg);
+        addSystemMessage('❌ 猫猫进程同步失败：' + msg, 'pipeline-msg');
+    });
+}
+
 function pipelineBuildRolesFromCats() {
     if (!cats.length) return null;
     return {
@@ -1858,6 +2009,19 @@ function pipelineBuildRolesFromCats() {
         reviewer: cats[1 % cats.length],
         tester: cats[2 % cats.length]
     };
+}
+
+function pipelineResolveWorkDir() {
+    var inputEl = document.getElementById('pipelineOutputDir');
+    var fromInput = String((inputEl && inputEl.value) || '').trim();
+    if (fromInput) return fromInput;
+    var fromState = String((plState && plState.outputDir) || '').trim();
+    if (fromState) return fromState;
+    try {
+        var saved = String(localStorage.getItem(PIPELINE_OUTPUT_DIR_STORAGE_KEY) || '').trim();
+        if (saved) return saved;
+    } catch (_) {}
+    return '';
 }
 
 function pipelineUpdateRoleAssign() {
@@ -1888,39 +2052,60 @@ function pipelineStart() {
     var roleSwitchSummary = [roles.developer, roles.reviewer, roles.tester].map(function(cat) {
         return cat.name + '=' + (String(cat.pipelineSwitchCommand || '').trim() || '-');
     }).join(' / ');
-    plState = {
-        active: true,
-        phase: 'dev',
-        requirement: req,
-        outputDir: outputDir,
-        timeoutMs: timeoutSec * 1000,
-        useClaudeCodeCli: true,
-        roles: roles,
-        results: {}
-    };
     document.getElementById('ppStartBtn').disabled = true;
-    document.getElementById('ppResetBtn').disabled = false;
-    renderMembers();
-    pipelineUpdateStatus();
-    addSystemMessage('🚀 流水线已启动！需求已下发。', 'pipeline-msg');
-    addSystemMessage('📋 需求描述：' + req, 'pipeline-msg');
-    addSystemMessage('📁 输出目录：' + outputDir, 'pipeline-msg');
-    addSystemMessage('⏱️ 单任务超时：' + timeoutSec + ' 秒', 'pipeline-msg');
-    addSystemMessage('🔀 模型切换：' + roleSwitchSummary, 'pipeline-msg');
-    addSystemMessage('🤖 Claude Code CLI 模式已启用：流水线阶段将通过 minimal-claude.js 执行。', 'pipeline-msg');
-    addSystemMessage('🛠️ 阶段一：' + plState.roles.developer.emoji + ' ' + plState.roles.developer.name + ' 正在进行模块设计与代码开发...', 'pipeline-dev-msg');
-    // Trigger developer cat
-    var devCat = plState.roles.developer;
-    var devRole = PIPELINE_ROLES.developer;
-    var devPayload = {
-        system: devRole.systemPrompt(req),
-        messages: [{ role:'user', content: devRole.taskPrompt(req) }]
-    };
-    triggerPipelineCatResponse(devCat, devPayload, 'dev');
+    addSystemMessage('🔌 正在为每只猫猫分配并启动专属 CLI 端口...', 'pipeline-msg');
+
+    syncPipelineCliAgents().then(function(syncData) {
+        pipelineApplySyncedPorts(syncData);
+        pipelineRenderCliStatus(syncData, '');
+        var portSummary = (syncData && Array.isArray(syncData.agents))
+            ? syncData.agents.map(function(a) { return String(a.catName || a.catId || 'cat') + ':' + String(a.port || '-'); }).join(' / ')
+            : cats.map(function(cat) { return cat.name + ':' + normalizePipelineCliPort(cat.pipelineCliPort, 3460); }).join(' / ');
+
+        plState = {
+            active: true,
+            phase: 'dev',
+            requirement: req,
+            outputDir: outputDir,
+            timeoutMs: timeoutSec * 1000,
+            useClaudeCodeCli: true,
+            roles: roles,
+            results: {}
+        };
+        document.getElementById('ppResetBtn').disabled = false;
+        renderMembers();
+        pipelineUpdateStatus();
+        addSystemMessage('🚀 流水线已启动！需求已下发。', 'pipeline-msg');
+        addSystemMessage('📋 需求描述：' + req, 'pipeline-msg');
+        addSystemMessage('📁 输出目录：' + outputDir, 'pipeline-msg');
+        addSystemMessage('⏱️ 单任务超时：' + timeoutSec + ' 秒', 'pipeline-msg');
+        addSystemMessage('🔀 模型切换：' + roleSwitchSummary, 'pipeline-msg');
+        addSystemMessage('🧩 专属 CLI 端口：' + portSummary, 'pipeline-msg');
+        addSystemMessage('🤖 Claude Code CLI 多实例模式已启用：每只猫通过各自端口连接后端进程。', 'pipeline-msg');
+        addSystemMessage('🛠️ 阶段一：' + plState.roles.developer.emoji + ' ' + plState.roles.developer.name + ' 正在进行模块设计与代码开发...', 'pipeline-dev-msg');
+        var devCat = plState.roles.developer;
+        var devRole = PIPELINE_ROLES.developer;
+        var devPayload = {
+            system: devRole.systemPrompt(req),
+            messages: [{ role:'user', content: devRole.taskPrompt(req) }]
+        };
+        triggerPipelineCatResponse(devCat, devPayload, 'dev');
+    }).catch(function(err) {
+        document.getElementById('ppStartBtn').disabled = false;
+        document.getElementById('ppResetBtn').disabled = true;
+        var msg = String(err && err.message || '同步猫猫 CLI 失败');
+        pipelineRenderCliStatus(null, msg);
+        addSystemMessage('❌ 无法启动流水线：' + msg, 'pipeline-msg');
+        showToast('❌ ' + msg);
+    });
 }
 
 function buildPipelineClaudePrompt(cat, chatPayload, phase) {
     var msgs = Array.isArray(chatPayload.messages) ? chatPayload.messages : [];
+    var workDir = pipelineResolveWorkDir();
+    var workDirHint = workDir
+        ? ['【工作目录】', workDir, '', '权限说明：你已被授权在该目录及其子目录内进行读取、写入、创建、修改、删除与命令执行。后续对话默认以该目录为工作目录。', ''].join('\n')
+        : '';
     if (phase === 'chat') {
         var latestUser = '';
         for (var i = msgs.length - 1; i >= 0; i--) {
@@ -1934,6 +2119,7 @@ function buildPipelineClaudePrompt(cat, chatPayload, phase) {
         }).join('\n\n');
         return [
             '你是技术助手，请直接回答用户问题。',
+            workDirHint,
             '',
             '【当前用户问题】',
             latestUser || '（无）',
@@ -1958,6 +2144,7 @@ function buildPipelineClaudePrompt(cat, chatPayload, phase) {
         '你现在在 CatChat 的代码流水线中执行任务，请直接输出该阶段结果。',
         '执行者: ' + (cat && cat.name ? cat.name : '未命名执行者'),
         '阶段: ' + (phaseMap[phase] || phase),
+        workDirHint,
         '',
         '【系统设定】',
         String(chatPayload.system || ''),
@@ -1987,6 +2174,8 @@ function callPipelineClaudeCodeCLI(cat, chatPayload, phase) {
         }
     }
     var switchCommand = String((cat && cat.pipelineSwitchCommand) || '').trim();
+    var catCliPort = normalizePipelineCliPort(cat && cat.pipelineCliPort, suggestPipelineCliPort());
+    var workDir = pipelineResolveWorkDir();
     return fetch(proxyUrl + '/claude-code', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
@@ -1996,8 +2185,11 @@ function callPipelineClaudeCodeCLI(cat, chatPayload, phase) {
             source: 'pipeline',
             phase: String(phase || ''),
             catName: String((cat && cat.name) || ''),
+            catId: String((cat && cat.id) || ''),
+            catCliPort: catCliPort,
             taskPreview: taskPreview,
-            outputDir: String(plState.outputDir || ''),
+            workingDir: workDir,
+            outputDir: workDir || String(plState.outputDir || ''),
             switchCommand: switchCommand
         })
     }).then(function(response) {
@@ -2148,6 +2340,11 @@ function pipelineReset() {
     document.getElementById('ppStartBtn').disabled = false;
     document.getElementById('ppResetBtn').disabled = true;
     document.getElementById('ppStatus').style.display = 'none';
+    var ppCliStatus = document.getElementById('ppCliStatus');
+    if (ppCliStatus) {
+        ppCliStatus.style.display = 'none';
+        ppCliStatus.innerHTML = '';
+    }
     document.getElementById('pipelineRequirement').value = '';
     var useCliEl = document.getElementById('ppUseClaudeCodeCli');
     if (useCliEl) useCliEl.checked = false;
@@ -2282,7 +2479,8 @@ function addCat() {
         model: document.getElementById('catModel').value.trim() || gModel || cfg.defaultModel,
         claudeVersion: document.getElementById('claudeApiVersion').value.trim() || '2023-06-01',
         badgeClass: cfg.badgeClass,
-        pipelineSwitchCommand: ''
+        pipelineSwitchCommand: '',
+        pipelineCliPort: suggestPipelineCliPort()
     };
     if (!pipelineManaged && !cat.apiKey && !(provider === 'custom' && customCompat !== 'claude')) { showToast('⚠️ 请填写 API Key（可在全局设置中配置）'); return; }
     cats.push(cat);
@@ -2354,6 +2552,7 @@ function renderMembers() {
         var pipelineSwitchEditor = '';
         if (gameMode === 'pipeline') {
             var selected = String(cat.pipelineSwitchCommand || '').trim();
+            var cliPort = normalizePipelineCliPort(cat.pipelineCliPort, suggestPipelineCliPort());
             pipelineSwitchEditor = '<div style="margin-top:6px;display:flex;align-items:center;gap:6px;">' +
                 '<span style="font-size:11px;color:rgba(0,0,0,0.55);">模型切换</span>' +
                 '<select style="font-size:11px;padding:2px 6px;border:1px solid rgba(0,0,0,0.15);border-radius:6px;background:#fff;color:#111;" onchange="setCatPipelineSwitchCommand(\'' + cat.id + '\', this.value)">' +
@@ -2362,6 +2561,10 @@ function renderMembers() {
                 '<option value="use-opus46"' + (selected === 'use-opus46' ? ' selected' : '') + '>use-opus46</option>' +
                 '<option value="use-kimi"' + (selected === 'use-kimi' ? ' selected' : '') + '>use-kimi</option>' +
                 '</select>' +
+                '</div>';
+            pipelineSwitchEditor += '<div style="margin-top:4px;display:flex;align-items:center;gap:6px;">' +
+                '<span style="font-size:11px;color:rgba(0,0,0,0.55);">CLI端口</span>' +
+                '<input type="number" min="1024" max="65535" value="' + cliPort + '" onchange="setCatPipelineCliPort(\'' + cat.id + '\', this.value)" style="width:100px;font-size:11px;padding:2px 6px;border:1px solid rgba(0,0,0,0.15);border-radius:6px;background:#fff;color:#111;">' +
                 '</div>';
         }
         html += '<div class="member-card"><div class="member-avatar" style="background:linear-gradient(135deg,' + cat.color + ',' + adjustColor(cat.color, -20) + ');" onmouseenter="showCatTooltip(\'' + cat.id + '\',event)" onmouseleave="hideCatTooltip()">' + catAvatarHtml(cat) + '</div><div class="member-status' + statusClass + '"></div><div class="member-info"><div class="member-name">' + escapeHtml(cat.name) + '</div><div class="member-role"><span class="provider-badge ' + cat.badgeClass + '">' + providerCfg.icon + ' ' + cat.model + '</span> <span style="font-size:11px;color:rgba(0,0,0,0.45);">' + escapeHtml(cat.breed || '家猫') + '</span> <span style="font-size:11px;color:' + (isOnline ? '#10b981' : '#9ca3af') + ';">' + statusText + '</span>' + roleHtml + '</div>' + pipelineSwitchEditor + '</div><button class="member-remove" onclick="removeCat(\'' + cat.id + '\')" title="移除">✕</button></div>';
@@ -2381,6 +2584,24 @@ function setCatPipelineSwitchCommand(catId, cmd) {
     monitorCollectInvokeConfig();
     monitorPersistConfig();
     persistCatsToBackendEnv('更新猫猫模型切换命令');
+}
+
+function setCatPipelineCliPort(catId, value) {
+    var cat = cats.find(function(c) { return c.id === catId; });
+    if (!cat) return;
+    var next = normalizePipelineCliPort(value, cat.pipelineCliPort || suggestPipelineCliPort());
+    var duplicated = cats.some(function(c) {
+        return c.id !== catId && Number(c.pipelineCliPort) === Number(next);
+    });
+    if (duplicated) {
+        showToast('⚠️ 端口 ' + next + ' 已被其他猫猫占用');
+        renderMembers();
+        return;
+    }
+    cat.pipelineCliPort = next;
+    monitorCollectInvokeConfig();
+    monitorPersistConfig();
+    persistCatsToBackendEnv('更新猫猫 CLI 端口');
 }
 function updateOnlineCount() {
     var onlineCats = cats.filter(function(cat) { return catOnlineState(cat); }).length;

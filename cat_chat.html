@@ -476,8 +476,11 @@
             <div class="pp-actions">
                 <button class="pp-btn pp-btn-start" id="ppStartBtn" onclick="pipelineStart()">🚀 启动流水线</button>
                 <button class="pp-btn pp-btn-reset" id="ppResetBtn" onclick="pipelineReset()" disabled>🔄 重置</button>
+                <button class="pp-btn pp-btn-reset" onclick="pipelineAutoAssignPorts()">🧮 自动分配端口</button>
+                <button class="pp-btn pp-btn-reset" onclick="pipelineSyncCliNow()">🔌 同步猫猫进程</button>
             </div>
             <div class="pp-status" id="ppStatus" style="display:none;"></div>
+            <div class="pp-status" id="ppCliStatus" style="display:none;margin-top:8px;"></div>
         </div>
         <div class="monitor-panel" id="monitorPanel">
             <div class="mn-title">🛰️ 联动观测台</div>

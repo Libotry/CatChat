@@ -40,6 +40,18 @@ if (verboseEnabled) {
 // Print the effective model env for observability in the parent proxy logs.
 console.error('ANTHROPIC_MODEL=' + String(process.env.ANTHROPIC_MODEL || ''));
 
+function resolveWorkingDirectory(raw) {
+  const input = String(raw || '').trim();
+  if (!input) return __dirname;
+  const resolved = path.isAbsolute(input) ? input : path.resolve(__dirname, input);
+  fs.mkdirSync(resolved, { recursive: true });
+  const st = fs.statSync(resolved);
+  if (!st.isDirectory()) {
+    throw new Error('工作目录不是文件夹: ' + resolved);
+  }
+  return resolved;
+}
+
 if (!prompt) {
   // ====================== Server Mode ======================
   // When run without a prompt, start an HTTP server that accepts
@@ -73,9 +85,16 @@ if (!prompt) {
     return s;
   }
 
-  function spawnClaudeForPrompt(reqPrompt, timeoutMs, switchCommand) {
+  function spawnClaudeForPrompt(reqPrompt, timeoutMs, switchCommand, workingDir) {
     return new Promise((resolve, reject) => {
       const scriptPath = __filename;
+      let effectiveWorkDir;
+      try {
+        effectiveWorkDir = resolveWorkingDirectory(workingDir);
+      } catch (err) {
+        reject(err);
+        return;
+      }
       let child;
 
       if (isWindows && String(switchCommand || '').trim()) {
@@ -98,18 +117,21 @@ if (!prompt) {
         ].join('; ');
 
         child = spawn('powershell.exe', ['-NoLogo', '-NoProfile', '-Command', psScript], {
-          cwd: __dirname,
+          cwd: effectiveWorkDir,
           stdio: ['ignore', 'pipe', 'pipe'],
           env: Object.assign({}, process.env, {
-            CATCHAT_PROMPT_B64: Buffer.from(String(reqPrompt || ''), 'utf-8').toString('base64')
+            CATCHAT_PROMPT_B64: Buffer.from(String(reqPrompt || ''), 'utf-8').toString('base64'),
+            CATCHAT_WORKDIR: effectiveWorkDir
           }),
         });
       } else {
         const childArgs = [scriptPath, reqPrompt];
         child = spawn(process.execPath, childArgs, {
-          cwd: __dirname,
+          cwd: effectiveWorkDir,
           stdio: ['ignore', 'pipe', 'pipe'],
-          env: process.env,
+          env: Object.assign({}, process.env, {
+            CATCHAT_WORKDIR: effectiveWorkDir
+          }),
         });
       }
 
@@ -206,6 +228,7 @@ if (!prompt) {
         const timeoutMsRaw = Number(payload.timeoutMs || 240000);
         const timeoutMs = Number.isFinite(timeoutMsRaw) ? Math.max(10000, Math.min(3600000, timeoutMsRaw)) : 240000;
         const switchCommand = String(payload.switchCommand || '').trim();
+        const workingDir = String(payload.workingDir || '').trim();
         if (!reqPrompt) {
           res.writeHead(400, { 'Content-Type': 'application/json' });
           res.end(JSON.stringify({ error: '缺少 prompt 参数' }));
@@ -215,7 +238,10 @@ if (!prompt) {
         if (switchCommand) {
           console.error(`[#${reqId}] 🔀 模型切换命令: ${switchCommand}`);
         }
-        const result = await spawnClaudeForPrompt(reqPrompt, timeoutMs, switchCommand);
+        if (workingDir) {
+          console.error(`[#${reqId}] 📁 工作目录: ${workingDir}`);
+        }
+        const result = await spawnClaudeForPrompt(reqPrompt, timeoutMs, switchCommand, workingDir);
         console.error(`[#${reqId}] ✅ 完成`);
         res.writeHead(200, { 'Content-Type': 'application/json' });
         res.end(JSON.stringify({ ok: true, reply: result.reply, stderr: result.stderr || '' }));
@@ -299,8 +325,10 @@ function resolveWindowsClaudeCliEntrypoint() {
 }
 
 const child = (() => {
+  const effectiveWorkDir = resolveWorkingDirectory(process.env.CATCHAT_WORKDIR || '');
   if (!isWindows) {
     return spawn(claudeBin, claudeArgs, {
+      cwd: effectiveWorkDir,
       stdio: ['ignore', 'pipe', 'pipe'],
     });
   }
@@ -311,12 +339,14 @@ const child = (() => {
     const cliJs = resolveWindowsClaudeCliEntrypoint();
     if (cliJs) {
       return spawn(process.execPath, [cliJs, ...claudeArgs], {
+        cwd: effectiveWorkDir,
         stdio: ['ignore', 'pipe', 'pipe'],
       });
     }
   }
 
   return spawn(process.env.ComSpec || 'cmd.exe', ['/d', '/s', '/c', claudeBin, ...claudeArgs], {
+    cwd: effectiveWorkDir,
     stdio: ['ignore', 'pipe', 'pipe'],
   });
 })();

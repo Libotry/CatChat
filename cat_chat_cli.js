@@ -7,10 +7,11 @@
 
 const http = require('http');
 const https = require('https');
+const net = require('net');
 const url = require('url');
 const path = require('path');
 const fs = require('fs');
-const { spawn } = require('child_process');
+const { spawn, spawnSync } = require('child_process');
 
 // ====================== Config ======================
 const DEFAULT_PORT = 3456;
@@ -134,9 +135,87 @@ function sanitizeSwitchCommand(raw) {
     return s;
 }
 
-function runMinimalClaude(prompt, timeoutMs, switchCommand, onAnthropicModel, onCliLog) {
+function spawnMinimalClaudeServer(port, switchCommand) {
+    const scriptPath = path.join(__dirname, 'minimal-claude.js');
+    const switchCmd = String(switchCommand || '').trim();
+
+    if (process.platform === 'win32') {
+        return new Promise(function(resolve, reject) {
+            let safeSwitch = '';
+            try {
+                safeSwitch = switchCmd ? sanitizeSwitchCommand(switchCmd) : '';
+            } catch (e) {
+                reject(e);
+                return;
+            }
+
+            const nodeExe = String(process.execPath || 'node').replace(/'/g, "''");
+            const scriptEscaped = String(scriptPath || '').replace(/'/g, "''");
+            const cwdEscaped = String(__dirname || '').replace(/'/g, "''");
+            const psParts = [
+                "$ErrorActionPreference='Stop'",
+                'if (Test-Path $PROFILE) { . $PROFILE }'
+            ];
+            if (safeSwitch) psParts.push(safeSwitch);
+            psParts.push("$p = Start-Process -FilePath '" + nodeExe + "' -ArgumentList @('" + scriptEscaped + "','--port','" + String(port) + "') -WorkingDirectory '" + cwdEscaped + "' -PassThru");
+            psParts.push("Write-Output ('AGENT_PID=' + $p.Id)");
+
+            const launcher = spawn('powershell.exe', ['-NoLogo', '-NoProfile', '-Command', psParts.join('; ')], {
+                cwd: __dirname,
+                stdio: ['ignore', 'pipe', 'pipe'],
+                env: process.env
+            });
+
+            let out = '';
+            let err = '';
+            launcher.stdout.on('data', function(chunk) { out += String(chunk || ''); });
+            launcher.stderr.on('data', function(chunk) { err += String(chunk || ''); });
+            launcher.on('error', reject);
+            launcher.on('close', function(code) {
+                const m = String(out || '').match(/AGENT_PID=(\d+)/);
+                const pid = m ? parseInt(m[1], 10) : NaN;
+                if (code === 0 && Number.isFinite(pid) && pid > 0) {
+                    resolve({ pid: pid, child: null, mode: 'start-process' });
+                    return;
+                }
+                reject(new Error(String(err || out || ('Start-Process 启动失败，退出码: ' + code)).trim()));
+            });
+        });
+    }
+
+    return Promise.resolve({
+        pid: null,
+        mode: 'spawn',
+        child: spawn(process.execPath, [scriptPath, '--port', String(port)], {
+            cwd: __dirname,
+            stdio: ['ignore', 'pipe', 'pipe'],
+            env: process.env
+        })
+    });
+}
+
+function resolveWorkingDirectory(raw) {
+    const input = String(raw || '').trim();
+    if (!input) return __dirname;
+    const resolved = path.isAbsolute(input) ? input : path.resolve(__dirname, input);
+    fs.mkdirSync(resolved, { recursive: true });
+    const st = fs.statSync(resolved);
+    if (!st.isDirectory()) {
+        throw new Error('工作目录不是文件夹: ' + resolved);
+    }
+    return resolved;
+}
+
+function runMinimalClaude(prompt, timeoutMs, switchCommand, workingDir, onAnthropicModel, onCliLog) {
     return new Promise(function(resolve, reject) {
         const scriptPath = path.join(__dirname, 'minimal-claude.js');
+        let effectiveWorkDir;
+        try {
+            effectiveWorkDir = resolveWorkingDirectory(workingDir);
+        } catch (e) {
+            reject(e);
+            return;
+        }
         let child;
 
         if (process.platform === 'win32' && String(switchCommand || '').trim()) {
@@ -157,17 +236,21 @@ function runMinimalClaude(prompt, timeoutMs, switchCommand, onAnthropicModel, on
                 'exit $LASTEXITCODE'
             ].join('; ');
             child = spawn('powershell.exe', ['-NoLogo', '-NoProfile', '-Command', psScript], {
-                cwd: __dirname,
+                cwd: effectiveWorkDir,
                 stdio: ['ignore', 'pipe', 'pipe'],
                 env: Object.assign({}, process.env, {
-                    CATCHAT_PROMPT_B64: Buffer.from(String(prompt || ''), 'utf-8').toString('base64')
+                    CATCHAT_PROMPT_B64: Buffer.from(String(prompt || ''), 'utf-8').toString('base64'),
+                    CATCHAT_WORKDIR: effectiveWorkDir
                 })
             });
         } else {
             const args = [scriptPath, prompt];
             child = spawn(process.execPath, args, {
-                cwd: __dirname,
-                stdio: ['ignore', 'pipe', 'pipe']
+                cwd: effectiveWorkDir,
+                stdio: ['ignore', 'pipe', 'pipe'],
+                env: Object.assign({}, process.env, {
+                    CATCHAT_WORKDIR: effectiveWorkDir
+                })
             });
         }
 
@@ -391,6 +474,284 @@ function persistPipelineArtifacts(phase, outputDirRaw, replyText) {
     return { summary, files, outputDir: baseDir };
 }
 
+const pipelineCliAgentsByCatId = new Map();
+
+function sanitizeCliPort(raw) {
+    const p = parseInt(raw, 10);
+    if (!Number.isFinite(p) || p < 1024 || p > 65535) {
+        throw new Error('CLI 端口非法，必须在 1024-65535 之间');
+    }
+    return p;
+}
+
+function isPortUsedByOtherAgent(port, currentCatId) {
+    return Array.from(pipelineCliAgentsByCatId.values()).some(function(a) {
+        return a.port === port && a.catId !== currentCatId && isProcessRunning(a);
+    });
+}
+
+function checkPortFree(port) {
+    return new Promise(function(resolve) {
+        const server = net.createServer();
+        server.once('error', function(err) {
+            const code = String(err && err.code || '');
+            if (code === 'EADDRINUSE' || code === 'EACCES') {
+                resolve(false);
+                return;
+            }
+            resolve(false);
+        });
+        server.once('listening', function() {
+            server.close(function() { resolve(true); });
+        });
+        try {
+            server.listen({ port: port, host: '127.0.0.1' });
+        } catch (_) {
+            resolve(false);
+        }
+    });
+}
+
+function resolveAvailablePort(startPort, reservedPorts, currentCatId) {
+    const reserved = reservedPorts || new Set();
+    const maxScan = 2048;
+    let candidate = sanitizeCliPort(startPort);
+    let scanned = 0;
+
+    function next() {
+        if (scanned >= maxScan || candidate > 65535) {
+            return Promise.reject(new Error('未找到可用 CLI 端口（从 ' + startPort + ' 起扫描）'));
+        }
+        scanned++;
+
+        if (reserved.has(candidate) || candidate === PORT || isPortUsedByOtherAgent(candidate, currentCatId)) {
+            candidate++;
+            return next();
+        }
+        return checkPortFree(candidate).then(function(free) {
+            if (free) return candidate;
+            candidate++;
+            return next();
+        });
+    }
+
+    return next();
+}
+
+function isProcessRunning(agent) {
+    if (!agent) return false;
+    if (Number.isFinite(agent.pid) && agent.pid > 0) {
+        try {
+            process.kill(agent.pid, 0);
+            return true;
+        } catch (_) {
+            return false;
+        }
+    }
+    const child = agent.child;
+    return !!(child && !child.killed && child.exitCode == null);
+}
+
+function stopPipelineCliAgent(agent) {
+    if (!agent) return;
+    if (Number.isFinite(agent.pid) && agent.pid > 0 && process.platform === 'win32') {
+        try {
+            spawnSync('taskkill', ['/PID', String(agent.pid), '/T', '/F'], { stdio: 'ignore' });
+        } catch (_) {}
+        return;
+    }
+    if (agent.child) {
+        try { agent.child.kill(); } catch (_) {}
+    }
+}
+
+function waitForServerReady(port, timeoutMs) {
+    const startedAt = Date.now();
+    const intervalMs = 250;
+    const maxWait = Math.max(2000, Number(timeoutMs || 12000));
+
+    return new Promise(function(resolve, reject) {
+        function probe() {
+            const req = http.get({ hostname: '127.0.0.1', port: port, path: '/health', timeout: 1500 }, function(res) {
+                let body = '';
+                res.on('data', function(chunk) { body += chunk; });
+                res.on('end', function() {
+                    if (res.statusCode === 200) {
+                        resolve(true);
+                        return;
+                    }
+                    retryOrFail(new Error('CLI 健康检查失败: HTTP ' + res.statusCode));
+                });
+            });
+            req.on('error', function(err) {
+                retryOrFail(err);
+            });
+            req.on('timeout', function() {
+                req.destroy(new Error('timeout'));
+            });
+        }
+
+        function retryOrFail(lastErr) {
+            if (Date.now() - startedAt >= maxWait) {
+                reject(new Error('等待 CLI 端口 ' + port + ' 就绪超时: ' + String(lastErr && lastErr.message || 'unknown')));
+                return;
+            }
+            setTimeout(probe, intervalMs);
+        }
+
+        probe();
+    });
+}
+
+function ensurePipelineCliAgent(spec, reservedPorts) {
+    const catId = String(spec && spec.catId || '').trim();
+    const catName = String(spec && spec.catName || '').trim() || catId;
+    const requestedPort = sanitizeCliPort(spec && spec.port);
+    const autoResolve = spec && spec.autoResolvePortConflict !== false;
+    const switchCommand = String(spec && spec.switchCommand || '').trim();
+
+    if (!catId) {
+        return Promise.reject(new Error('缺少 catId')); 
+    }
+
+    const current = pipelineCliAgentsByCatId.get(catId);
+    const reserved = reservedPorts || new Set();
+
+    return resolveAvailablePort(requestedPort, reserved, catId).then(function(port) {
+        if (!autoResolve && port !== requestedPort) {
+            throw new Error('端口 ' + requestedPort + ' 不可用，请更换');
+        }
+
+        if (current && current.port === port && isProcessRunning(current)) {
+            if (String(current.switchCommand || '') !== switchCommand) {
+                stopPipelineCliAgent(current);
+                pipelineCliAgentsByCatId.delete(catId);
+            } else {
+                return {
+                    catId: catId,
+                    catName: catName,
+                    port: port,
+                    requestedPort: requestedPort,
+                    reassigned: port !== requestedPort,
+                    switchCommand: switchCommand,
+                    pid: Number.isFinite(current.pid) ? current.pid : null,
+                    mode: current.mode || 'spawn',
+                    status: 'reused'
+                };
+            }
+        }
+        if (current && current.port !== port) {
+            stopPipelineCliAgent(current);
+            pipelineCliAgentsByCatId.delete(catId);
+        }
+
+        return spawnMinimalClaudeServer(port, switchCommand).then(function(launched) {
+            const agent = {
+                catId: catId,
+                catName: catName,
+                port: port,
+                switchCommand: switchCommand,
+                pid: Number.isFinite(launched && launched.pid) ? launched.pid : null,
+                child: (launched && launched.child) || null,
+                mode: String((launched && launched.mode) || 'spawn'),
+                startedAt: new Date().toISOString()
+            };
+            pipelineCliAgentsByCatId.set(catId, agent);
+
+            if (agent.child) {
+                agent.child.stdout.on('data', function(chunk) {
+                    const msg = String(chunk || '').trim();
+                    if (!msg) return;
+                    log('  ', C.dim, 'CAT-CLI[' + port + ']', msg.slice(0, 240));
+                });
+                agent.child.stderr.on('data', function(chunk) {
+                    const msg = String(chunk || '').trim();
+                    if (!msg) return;
+                    log('  ', C.dim, 'CAT-CLI[' + port + '][err]', msg.slice(0, 240));
+                });
+                agent.child.on('exit', function(code, signal) {
+                    const now = pipelineCliAgentsByCatId.get(catId);
+                    if (now && now.child === agent.child) {
+                        pipelineCliAgentsByCatId.delete(catId);
+                    }
+                    log('⚠️', C.yellow, 'CAT-CLI EXIT', catName + ' @' + port + ' code=' + code + ' signal=' + (signal || '-'));
+                });
+            } else {
+                log('🪟', C.cyan, 'CAT-CLI WINDOW', catName + ' @' + port + ' PID=' + String(agent.pid || '-'));
+            }
+
+            return waitForServerReady(port, 15000).then(function() {
+                return {
+                    catId: catId,
+                    catName: catName,
+                    port: port,
+                    requestedPort: requestedPort,
+                    reassigned: port !== requestedPort,
+                    switchCommand: switchCommand,
+                    pid: agent.pid,
+                    mode: agent.mode,
+                    status: 'started'
+                };
+            }).catch(function(err) {
+                stopPipelineCliAgent(agent);
+                pipelineCliAgentsByCatId.delete(catId);
+                throw err;
+            });
+        });
+    });
+}
+
+function syncPipelineCliAgents(cats) {
+    const list = Array.isArray(cats) ? cats : [];
+    const desiredIds = {};
+    list.forEach(function(item) {
+        const cid = String(item && item.catId || '').trim();
+        if (cid) desiredIds[cid] = true;
+    });
+
+    // Stop removed cats.
+    Array.from(pipelineCliAgentsByCatId.values()).forEach(function(agent) {
+        if (!desiredIds[agent.catId]) {
+            stopPipelineCliAgent(agent);
+            pipelineCliAgentsByCatId.delete(agent.catId);
+        }
+    });
+
+    const reserved = new Set([PORT]);
+    let chain = Promise.resolve([]);
+    list.forEach(function(item) {
+        chain = chain.then(function(results) {
+            const spec = Object.assign({}, item, { autoResolvePortConflict: true });
+            return ensurePipelineCliAgent(spec, reserved).then(function(info) {
+                reserved.add(info.port);
+                results.push(info);
+                return results;
+            });
+        });
+    });
+    return chain;
+}
+
+function callDedicatedCliServer(port, payload) {
+    const targetUrl = 'http://127.0.0.1:' + port + '/claude-code';
+    const body = JSON.stringify(payload || {});
+    return proxyRequest(targetUrl, 'POST', { 'Content-Type': 'application/json' }, body).then(function(result) {
+        let data = {};
+        try {
+            data = JSON.parse(String(result && result.body || '{}'));
+        } catch (_) {
+            throw new Error('猫猫 CLI 返回了不可解析的响应');
+        }
+        if (!result || result.statusCode >= 400 || data.ok !== true) {
+            throw new Error(String((data && data.error) || ('猫猫 CLI 调用失败，HTTP ' + (result && result.statusCode))));
+        }
+        return {
+            replyText: String(data.reply || '').trim(),
+            stderrText: String(data.stderr || '').trim()
+        };
+    });
+}
+
 // ====================== Request Counter ======================
 let requestCount = 0;
 
@@ -407,8 +768,58 @@ const server = http.createServer(function(req, res) {
 
     // Health check endpoint
     if (req.url === '/health' || req.url === '/ping') {
+        const agents = Array.from(pipelineCliAgentsByCatId.values()).map(function(a) {
+            return {
+                catId: a.catId,
+                catName: a.catName,
+                port: a.port,
+                switchCommand: String(a.switchCommand || ''),
+                pid: Number.isFinite(a.pid) ? a.pid : null,
+                mode: a.mode || 'spawn',
+                running: isProcessRunning(a)
+            };
+        });
         res.writeHead(200, { 'Content-Type': 'application/json' });
-        res.end(JSON.stringify({ status: 'ok', name: 'CatChat CLI Proxy', version: '1.0.0', uptime: process.uptime(), requests: requestCount }));
+        res.end(JSON.stringify({ status: 'ok', name: 'CatChat CLI Proxy', version: '1.0.0', uptime: process.uptime(), requests: requestCount, pipelineAgents: agents }));
+        return;
+    }
+
+    if (req.url === '/pipeline/sync' && req.method === 'POST') {
+        let body = '';
+        req.on('data', function(chunk) { body += chunk; });
+        req.on('end', function() {
+            let payload;
+            try {
+                payload = JSON.parse(body || '{}');
+            } catch (_) {
+                res.writeHead(400, { 'Content-Type': 'application/json' });
+                res.end(JSON.stringify({ ok: false, error: '无法解析请求体 JSON' }));
+                return;
+            }
+
+            const cats = Array.isArray(payload.cats) ? payload.cats : [];
+            if (!cats.length) {
+                res.writeHead(400, { 'Content-Type': 'application/json' });
+                res.end(JSON.stringify({ ok: false, error: '缺少 cats 参数' }));
+                return;
+            }
+
+            log('🧩', C.cyan, 'PIPELINE SYNC', '准备同步 ' + cats.length + ' 只猫猫的 CLI 进程');
+            syncPipelineCliAgents(cats).then(function(results) {
+                const started = results.filter(function(x) { return x.status === 'started'; }).length;
+                const reused = results.filter(function(x) { return x.status === 'reused'; }).length;
+                log('✅', C.green, 'PIPELINE SYNC', '完成，started=' + started + ', reused=' + reused);
+                results.forEach(function(a) {
+                    log('  ', C.dim, '  CAT', String(a.catName || a.catId) + ' @' + String(a.requestedPort || a.port) + (a.reassigned ? '->' + String(a.port) : '') + ' [' + String(a.switchCommand || '-') + '] pid=' + String(a.pid || '-'));
+                });
+                res.writeHead(200, { 'Content-Type': 'application/json' });
+                res.end(JSON.stringify({ ok: true, agents: results, started: started, reused: reused }));
+            }).catch(function(err) {
+                log('❌', C.red, 'PIPELINE SYNC', String(err && err.message || 'failed'));
+                res.writeHead(502, { 'Content-Type': 'application/json' });
+                res.end(JSON.stringify({ ok: false, error: String(err && err.message || '同步失败') }));
+            });
+        });
         return;
     }
 
@@ -524,9 +935,21 @@ const server = http.createServer(function(req, res) {
             const source = String(payload.source || '').trim();
             const phase = String(payload.phase || '').trim();
             const catName = String(payload.catName || '').trim();
+            const catId = String(payload.catId || '').trim();
             const taskPreview = String(payload.taskPreview || '').trim();
             const outputDir = String(payload.outputDir || '').trim();
+            const workingDir = String(payload.workingDir || outputDir || '').trim();
             const switchCommand = String(payload.switchCommand || '').trim();
+            let catCliPort = null;
+            if (payload.catCliPort !== undefined && payload.catCliPort !== null && String(payload.catCliPort).trim() !== '') {
+                try {
+                    catCliPort = sanitizeCliPort(payload.catCliPort);
+                } catch (e) {
+                    res.writeHead(400, { 'Content-Type': 'application/json' });
+                    res.end(JSON.stringify({ ok: false, error: e.message }));
+                    return;
+                }
+            }
 
             if (!prompt) {
                 res.writeHead(400, { 'Content-Type': 'application/json' });
@@ -538,8 +961,14 @@ const server = http.createServer(function(req, res) {
             if (source || phase || catName) {
                 log('  ', C.dim, '  路由', (source || '-') + ' / ' + (phase || '-') + ' / ' + (catName || '-'));
             }
+            if (catCliPort) {
+                log('  ', C.dim, '  猫猫端口', String(catCliPort));
+            }
             if (switchCommand) {
                 log('  ', C.dim, '  模型切换', switchCommand);
+            }
+            if (workingDir) {
+                log('  ', C.dim, '  工作目录', workingDir);
             }
             const currentQuestion = extractCurrentUserQuestion(prompt);
             const taskFromPrompt = extractTaskInput(prompt);
@@ -554,12 +983,22 @@ const server = http.createServer(function(req, res) {
             }
 
             const startTime = Date.now();
-            runMinimalClaude(prompt, timeoutMs, switchCommand, function(model) {
-                log('  ', C.dim, '  ANTHROPIC_MODEL', model || '(empty)');
-            }, function(stream, line) {
-                const channel = stream === 'stderr' ? 'CLI[err]' : 'CLI[out]';
-                log('  ', C.dim, '  ' + channel, String(line || '').slice(0, 400));
-            })
+            const runPromise = (source === 'pipeline' && catCliPort && catId)
+                ? ensurePipelineCliAgent({ catId: catId, catName: catName || catId, port: catCliPort, switchCommand: switchCommand }).then(function() {
+                    return callDedicatedCliServer(catCliPort, {
+                        prompt: prompt,
+                        timeoutMs: timeoutMs,
+                        workingDir: workingDir
+                    });
+                })
+                : runMinimalClaude(prompt, timeoutMs, switchCommand, workingDir, function(model) {
+                    log('  ', C.dim, '  ANTHROPIC_MODEL', model || '(empty)');
+                }, function(stream, line) {
+                    const channel = stream === 'stderr' ? 'CLI[err]' : 'CLI[out]';
+                    log('  ', C.dim, '  ' + channel, String(line || '').slice(0, 400));
+                });
+
+            runPromise
                 .then(function(result) {
                     const elapsed = Date.now() - startTime;
                     let pipeline = null;
@@ -595,7 +1034,7 @@ const server = http.createServer(function(req, res) {
 
     // 404 for everything else
     res.writeHead(404, { 'Content-Type': 'application/json' });
-    res.end(JSON.stringify({ error: 'Not Found. 请使用 POST /proxy 端点。' }));
+    res.end(JSON.stringify({ error: 'Not Found. 可用端点: POST /proxy, POST /claude-code, POST /pipeline/sync, GET /health' }));
 });
 
 // ====================== Start ======================
@@ -608,6 +1047,7 @@ server.listen(PORT, function() {
     console.log(`  ${C.green}✓${C.reset} 服务已启动: ${C.bold}${C.cyan}http://localhost:${PORT}${C.reset}`);
     console.log(`  ${C.green}✓${C.reset} 代理端点:   ${C.bold}POST http://localhost:${PORT}/proxy${C.reset}`);
     console.log(`  ${C.green}✓${C.reset} Claude端点:  ${C.bold}POST http://localhost:${PORT}/claude-code${C.reset}`);
+    console.log(`  ${C.green}✓${C.reset} 流水线同步: ${C.bold}POST http://localhost:${PORT}/pipeline/sync${C.reset}`);
     console.log(`  ${C.green}✓${C.reset} 健康检查:   ${C.bold}GET  http://localhost:${PORT}/health${C.reset}`);
     console.log('');
     console.log(`  ${C.yellow}📋 使用方法:${C.reset}`);
@@ -633,6 +1073,9 @@ server.on('error', function(err) {
 
 // Graceful shutdown
 process.on('SIGINT', function() {
+    Array.from(pipelineCliAgentsByCatId.values()).forEach(function(agent) {
+        stopPipelineCliAgent(agent);
+    });
     console.log(`\n\n${C.yellow}👋 CatChat CLI 代理已停止。再见喵～${C.reset}\n`);
     process.exit(0);
 });

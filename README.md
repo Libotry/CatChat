@@ -60,3 +60,7 @@ node cat_chat_cli.js --port 8080
 4. 点击 `🎮 开始游戏`，确认状态栏出现 `🔗联动中` 且轮次/阶段更新。
 5. 点击 `⏭ 下一阶段` 两次，确认阶段推进与存活数字随 `room_state` 变化。
 6. 观察聊天区，确认有后端发言同步（来自 `speech_history`）。
+
+## 📚 使用文档
+
+- 流水线多端口多进程使用说明：`docs/pipeline_multi_cli_usage.md`
