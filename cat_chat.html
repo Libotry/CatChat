@@ -19,7 +19,7 @@
         .app-container { display: flex; height: 100vh; }
 
         /* Sidebar */
-        .sidebar { width: var(--sidebar-width); background: var(--bg-secondary); border-right: 1px solid rgba(0,0,0,0.06); display: flex; flex-direction: column; flex-shrink: 0; box-shadow: var(--shadow-sm); z-index: 10; }
+        .sidebar { width: var(--sidebar-width); background: var(--bg-secondary); border-right: 1px solid rgba(0,0,0,0.06); display: flex; flex-direction: column; flex-shrink: 0; box-shadow: var(--shadow-sm); z-index: 10; overflow-y: auto; -webkit-overflow-scrolling: touch; }
         .sidebar-header { padding: 20px; text-align: center; border-bottom: 1px solid rgba(0,0,0,0.06); }
         .sidebar-header h1 { font-size: 22px; background: linear-gradient(135deg, var(--accent-pink), var(--accent-orange)); -webkit-background-clip: text; -webkit-text-fill-color: transparent; background-clip: text; }
         .sidebar-header p { font-size: 13px; color: var(--text-secondary); margin-top: 4px; }
@@ -142,7 +142,18 @@
         .message-content { display: flex; flex-direction: column; gap: 4px; }
         .message-sender { font-size: 12px; font-weight: 600; color: var(--text-secondary); padding: 0 4px; }
         .user-message .message-sender { text-align: right; }
-        .message-bubble { padding: 12px 18px; border-radius: var(--radius-md); font-size: 14.5px; line-height: 1.6; box-shadow: var(--shadow-sm); position: relative; word-wrap: break-word; }
+        .message-bubble { padding: 12px 18px; border-radius: var(--radius-md); font-size: 14.5px; line-height: 1.6; box-shadow: var(--shadow-sm); position: relative; word-wrap: break-word; white-space: pre-wrap; }
+        .message-bubble h1, .message-bubble h2, .message-bubble h3, .message-bubble h4 { margin: 6px 0 8px; line-height: 1.35; }
+        .message-bubble p { margin: 6px 0; }
+        .message-bubble ul, .message-bubble ol { margin: 6px 0 6px 20px; }
+        .message-bubble li { margin: 2px 0; }
+        .message-bubble code { background: rgba(148,163,184,0.2); padding: 1px 5px; border-radius: 6px; font-family: 'Consolas','Monaco',monospace; font-size: 0.92em; }
+        .message-bubble pre { margin: 8px 0; padding: 10px 12px; border-radius: 10px; background: #0f172a; color: #e2e8f0; overflow-x: auto; }
+        .message-bubble pre code { background: transparent; padding: 0; color: inherit; }
+        .message-bubble table { width: 100%; border-collapse: collapse; margin: 8px 0; font-size: 13px; }
+        .message-bubble th, .message-bubble td { border: 1px solid rgba(0,0,0,0.12); padding: 6px 8px; text-align: left; vertical-align: top; }
+        .message-bubble th { background: rgba(15,23,42,0.07); }
+        .message-bubble blockquote { margin: 8px 0; padding: 4px 10px; border-left: 3px solid rgba(15,23,42,0.3); color: #475569; }
         .user-message .message-bubble { background: linear-gradient(135deg, var(--accent-pink), var(--accent-orange)); color: white; border-bottom-right-radius: 6px; }
         .cat-message .message-bubble { background: var(--bg-chat); border: 1px solid rgba(0,0,0,0.06); border-bottom-left-radius: 6px; }
         .message-thinking { font-size: 12px; color: var(--text-secondary); font-style: italic; padding: 0 4px; display: flex; align-items: center; gap: 6px; }
@@ -285,7 +296,7 @@
         ::-webkit-scrollbar-thumb { background: rgba(0,0,0,0.12); border-radius: 3px; }
 
         @media (max-width: 768px) {
-            .sidebar { position: fixed; left: -100%; top: 0; height: 100vh; z-index: 100; transition: left 0.3s; }
+            .sidebar { position: fixed; left: -100%; top: 0; height: 100vh; z-index: 100; transition: left 0.3s; overflow-y: auto; }
             .sidebar.open { left: 0; }
             .right-panel { position: fixed; right: -100%; top: 0; height: 100vh; z-index: 100; width: 260px; transition: right 0.3s; }
             .right-panel:not(.collapsed) { right: 0; }
@@ -445,8 +456,21 @@
         <div class="pipeline-panel" id="pipelinePanel">
             <div class="pp-title">🏗️ 代码全栈流水线</div>
             <div class="pp-info">铲屎官提需求 → 猫1设计开发 → 猫2代码检视 → 猫3测试报告</div>
+            <div class="pp-info" style="margin-top:4px;opacity:0.88;">模型切换命令请在左侧成员列表中按猫设置（use-glm / use-minimax / use-kimi）。</div>
             <div class="pp-requirement">
                 <textarea id="pipelineRequirement" placeholder="请输入需求详细描述...&#10;例如：用 Python 实现一个 JWT 认证中间件，支持 token 签发、验证和刷新，包含错误处理和日志记录。"></textarea>
+            </div>
+            <div class="pp-requirement" style="margin-top:8px;">
+                <input id="pipelineOutputDir" type="text" placeholder="输出代码路径（如：auto_coding_mvp/src 或 D:\\work\\proj）" style="width:100%;padding:10px;border:1px solid rgba(255,255,255,0.15);border-radius:8px;background:rgba(255,255,255,0.08);color:white;font-size:13px;outline:none;"/>
+                <div style="font-size:11px;color:rgba(255,255,255,0.6);margin-top:6px;">流水线结果将按阶段自动创建/修改该目录下的文件。</div>
+            </div>
+            <div class="pp-requirement" style="margin-top:8px;">
+                <input id="pipelineTimeoutSec" type="number" min="30" max="3600" step="10" placeholder="任务超时（秒，默认900）" style="width:100%;padding:10px;border:1px solid rgba(255,255,255,0.15);border-radius:8px;background:rgba(255,255,255,0.08);color:white;font-size:13px;outline:none;"/>
+                <div style="font-size:11px;color:rgba(255,255,255,0.6);margin-top:6px;">单次任务超时，单位秒。建议 600~1800。</div>
+            </div>
+            <div style="margin-top:8px;font-size:12px;color:rgba(255,255,255,0.85);display:flex;align-items:center;gap:8px;">
+                <input type="checkbox" id="ppUseClaudeCodeCli" style="width:14px;height:14px;accent-color:#22c55e;"/>
+                <label for="ppUseClaudeCodeCli" style="cursor:pointer;">🤖 使用 Claude Code CLI（通过 minimal-claude.js）</label>
             </div>
             <div class="pp-role-assign" id="ppRoleAssign"></div>
             <div class="pp-actions">
