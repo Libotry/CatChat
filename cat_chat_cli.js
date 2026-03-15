@@ -17,6 +17,8 @@ const { spawn, spawnSync } = require('child_process');
 const DEFAULT_PORT = 3456;
 const PROXY_TIMEOUT_MS = 3600000;
 let PORT = DEFAULT_PORT;
+const MANAGED_ENV_KEYS = new Set();
+let activeSwitchCommand = '';
 
 // Parse CLI arguments
 const args = process.argv.slice(2);
@@ -134,6 +136,73 @@ function sanitizeSwitchCommand(raw) {
         throw new Error('切换命令格式非法，仅允许字母数字与 ._-');
     }
     return s;
+}
+
+function applySwitchCommandToProcessEnv(switchCommand) {
+    if (process.platform !== 'win32') {
+        return { applied: false, switchCommand: '', anthropicModel: String(process.env.ANTHROPIC_MODEL || ''), keys: [] };
+    }
+
+    const cmd = sanitizeSwitchCommand(switchCommand || '');
+    if (!cmd) {
+        activeSwitchCommand = '';
+        return { applied: false, switchCommand: '', anthropicModel: String(process.env.ANTHROPIC_MODEL || ''), keys: [] };
+    }
+
+    const psScript = [
+        "$ErrorActionPreference='Stop'",
+        'if (Test-Path $PROFILE) { . $PROFILE }',
+        cmd,
+        "$allow = @('ANTHROPIC_*','CLAUDE_*')",
+        "Get-ChildItem Env: | Where-Object { $name = $_.Name; ($allow | Where-Object { $name -like $_ }) } | ForEach-Object { Write-Output ('ENVKV:' + $_.Name + '=' + $_.Value) }"
+    ].join('; ');
+
+    const ret = spawnSync('powershell.exe', ['-NoLogo', '-NoProfile', '-Command', psScript], {
+        cwd: __dirname,
+        encoding: 'utf8',
+        timeout: 120000
+    });
+
+    if (ret.error) {
+        throw ret.error;
+    }
+    if (ret.status !== 0) {
+        throw new Error(String(ret.stderr || ret.stdout || ('模型切换命令执行失败，退出码: ' + ret.status)).trim());
+    }
+
+    const output = String(ret.stdout || '');
+    const kv = {};
+    output.split(/\r?\n/).forEach(function(line) {
+        const raw = String(line || '').trim();
+        if (!raw || raw.indexOf('ENVKV:') !== 0) return;
+        const pair = raw.slice('ENVKV:'.length);
+        const idx = pair.indexOf('=');
+        if (idx <= 0) return;
+        const key = pair.slice(0, idx).trim();
+        const value = pair.slice(idx + 1);
+        if (!key) return;
+        kv[key] = value;
+    });
+
+    MANAGED_ENV_KEYS.forEach(function(key) {
+        if (!Object.prototype.hasOwnProperty.call(kv, key)) {
+            delete process.env[key];
+            MANAGED_ENV_KEYS.delete(key);
+        }
+    });
+
+    Object.keys(kv).forEach(function(key) {
+        process.env[key] = kv[key];
+        MANAGED_ENV_KEYS.add(key);
+    });
+
+    activeSwitchCommand = cmd;
+    return {
+        applied: true,
+        switchCommand: cmd,
+        anthropicModel: String(process.env.ANTHROPIC_MODEL || ''),
+        keys: Object.keys(kv)
+    };
 }
 
 function spawnMinimalClaudeServer(port, switchCommand) {
@@ -781,7 +850,50 @@ const server = http.createServer(function(req, res) {
             };
         });
         res.writeHead(200, { 'Content-Type': 'application/json' });
-        res.end(JSON.stringify({ status: 'ok', name: 'CatChat CLI Proxy', version: '1.0.0', uptime: process.uptime(), requests: requestCount, pipelineAgents: agents }));
+        res.end(JSON.stringify({
+            status: 'ok',
+            name: 'CatChat CLI Proxy',
+            version: '1.0.0',
+            uptime: process.uptime(),
+            requests: requestCount,
+            activeSwitchCommand: activeSwitchCommand,
+            anthropicModel: String(process.env.ANTHROPIC_MODEL || ''),
+            pipelineAgents: agents
+        }));
+        return;
+    }
+
+    if (req.url === '/set-switch' && req.method === 'POST') {
+        let body = '';
+        req.on('data', function(chunk) { body += chunk; });
+        req.on('end', function() {
+            let payload;
+            try {
+                payload = JSON.parse(body || '{}');
+            } catch (_) {
+                res.writeHead(400, { 'Content-Type': 'application/json' });
+                res.end(JSON.stringify({ ok: false, error: '无法解析请求体 JSON' }));
+                return;
+            }
+
+            const switchCommand = String(payload.switchCommand || '').trim();
+            if (!switchCommand) {
+                res.writeHead(400, { 'Content-Type': 'application/json' });
+                res.end(JSON.stringify({ ok: false, error: '缺少 switchCommand 参数' }));
+                return;
+            }
+
+            try {
+                const result = applySwitchCommandToProcessEnv(switchCommand);
+                log('🔀', C.magenta, 'SET SWITCH', switchCommand + ' -> ANTHROPIC_MODEL=' + String(result.anthropicModel || ''));
+                res.writeHead(200, { 'Content-Type': 'application/json' });
+                res.end(JSON.stringify({ ok: true, result: result }));
+            } catch (err) {
+                log('❌', C.red, 'SET SWITCH', String(err && err.message || 'failed'));
+                res.writeHead(502, { 'Content-Type': 'application/json' });
+                res.end(JSON.stringify({ ok: false, error: String(err && err.message || '模型切换失败') }));
+            }
+        });
         return;
     }
 
@@ -912,7 +1024,8 @@ const server = http.createServer(function(req, res) {
             const taskPreview = String(payload.taskPreview || '').trim();
             const outputDir = String(payload.outputDir || '').trim();
             const workingDir = String(payload.workingDir || outputDir || '').trim();
-            const switchCommand = String(payload.switchCommand || '').trim();
+            const switchCommandRaw = String(payload.switchCommand || '').trim();
+            const switchCommand = source === 'pipeline' ? '' : switchCommandRaw;
             let catCliPort = null;
             if (payload.catCliPort !== undefined && payload.catCliPort !== null && String(payload.catCliPort).trim() !== '') {
                 try {
@@ -937,8 +1050,11 @@ const server = http.createServer(function(req, res) {
             if (catCliPort) {
                 log('  ', C.dim, '  猫猫端口', String(catCliPort));
             }
-            if (switchCommand) {
+            if (switchCommandRaw && source !== 'pipeline') {
                 log('  ', C.dim, '  模型切换', switchCommand);
+            }
+            if (source === 'pipeline' && switchCommandRaw) {
+                log('  ', C.dim, '  模型切换', '已忽略（手动多窗口模式下按窗口预设）');
             }
             if (workingDir) {
                 log('  ', C.dim, '  工作目录', workingDir);

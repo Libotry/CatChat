@@ -1896,25 +1896,44 @@ function syncPipelineCliAgents() {
     var checks = cats.map(function(cat) {
         var port = normalizePipelineCliPort(cat.pipelineCliPort, suggestPipelineCliPort());
         var baseUrl = buildCatCliBaseUrl(port);
+        var switchCommand = String(cat.pipelineSwitchCommand || '').trim();
         return fetch(baseUrl + '/health', { method: 'GET' }).then(function(resp) {
             if (!resp.ok) throw new Error('HTTP ' + resp.status);
             return resp.json().then(function(body) {
                 if (!body || body.status !== 'ok') throw new Error('health 返回异常');
-                return {
+                var info = {
                     catId: String(cat.id || ''),
                     catName: String(cat.name || ''),
                     port: port,
-                    switchCommand: String(cat.pipelineSwitchCommand || '').trim(),
+                    switchCommand: switchCommand,
                     status: 'connected',
                     baseUrl: baseUrl
                 };
+                if (!switchCommand) return info;
+
+                return fetch(baseUrl + '/set-switch', {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({ switchCommand: switchCommand })
+                }).then(function(setResp) {
+                    if (!setResp.ok) {
+                        return setResp.text().then(function(t) {
+                            throw new Error('模型切换失败 (' + setResp.status + '): ' + t.substring(0, 220));
+                        });
+                    }
+                    return setResp.json().then(function(setData) {
+                        info.appliedSwitch = true;
+                        info.anthropicModel = String((setData && setData.result && setData.result.anthropicModel) || '');
+                        return info;
+                    });
+                });
             });
         }).catch(function(err) {
             return {
                 catId: String(cat.id || ''),
                 catName: String(cat.name || ''),
                 port: port,
-                switchCommand: String(cat.pipelineSwitchCommand || '').trim(),
+                switchCommand: switchCommand,
                 status: 'offline',
                 baseUrl: baseUrl,
                 error: String(err && err.message || '连接失败')
@@ -1987,7 +2006,10 @@ function pipelineRenderCliStatus(syncData, errMsg) {
         var portLabel = String((a && a.port) || '-');
         lines.push('<div class="pp-step">' +
             '<span class="pp-step-badge ' + (online ? 'pp-step-done' : 'pp-step-waiting') + '">' + icon + ' ' + escapeHtml(status) + '</span>' +
-            ' ' + escapeHtml(String(a.catName || a.catId || 'cat')) + ' @ ' + escapeHtml(portLabel) + (a && a.error ? (' · ' + escapeHtml(String(a.error || ''))) : '') +
+            ' ' + escapeHtml(String(a.catName || a.catId || 'cat')) + ' @ ' + escapeHtml(portLabel) +
+            (a && a.switchCommand ? (' [' + escapeHtml(String(a.switchCommand)) + ']') : '') +
+            (a && a.anthropicModel ? (' => ' + escapeHtml(String(a.anthropicModel))) : '') +
+            (a && a.error ? (' · ' + escapeHtml(String(a.error || ''))) : '') +
             '</div>');
     });
     el.style.display = 'block';
@@ -2130,7 +2152,7 @@ function buildPipelineClaudePrompt(cat, chatPayload, phase) {
     var msgs = Array.isArray(chatPayload.messages) ? chatPayload.messages : [];
     var workDir = pipelineResolveWorkDir();
     var workDirHint = workDir
-        ? ['【工作目录】', workDir, '', '权限说明：你已被授权在该目录及其子目录内进行读取、写入、创建、修改、删除与命令执行。后续对话默认以该目录为工作目录。', ''].join('\n')
+        ? ['【工作目录】', workDir, '', '权限说明：你已被授权在该目录及其子目录内进行读取、写入、创建、修改、删除与命令执行。后续对话默认以该目录为工作目录。', '授权执行规则：无需向铲屎官二次确认授权；不要输出“需要在编辑器中授权/请先授权/等待授权”等表述；在工作目录权限范围内应直接实施修改并给出结果。', ''].join('\n')
         : '';
     if (phase === 'chat') {
         var latestUser = '';
@@ -2196,7 +2218,6 @@ function callPipelineClaudeCodeCLI(cat, chatPayload, phase) {
             if (taskPreview) break;
         }
     }
-    var switchCommand = String((cat && cat.pipelineSwitchCommand) || '').trim();
     var catCliPort = normalizePipelineCliPort(cat && cat.pipelineCliPort, suggestPipelineCliPort());
     var catBaseUrl = buildCatCliBaseUrl(catCliPort);
     var workDir = pipelineResolveWorkDir();
@@ -2211,8 +2232,7 @@ function callPipelineClaudeCodeCLI(cat, chatPayload, phase) {
             catName: String((cat && cat.name) || ''),
             taskPreview: taskPreview,
             workingDir: workDir,
-            outputDir: workDir || String(plState.outputDir || ''),
-            switchCommand: switchCommand
+            outputDir: workDir || String(plState.outputDir || '')
         })
     }).then(function(response) {
         if (!response.ok) {
