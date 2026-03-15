@@ -2590,8 +2590,44 @@ function buildApiMessages(cat, msgHistory, isIntro) {
     return { system: systemContent, messages: history };
 }
 
+function buildPipelineMentionPayload(targetCat, sourceCat, sourceReply) {
+    var mentionPrompt = sourceCat.name + ' 在流水线讨论中 @了你。请先直接回应对方，再给出你认为可执行的下一步。\n原消息：' + String(sourceReply || '');
+    var mentionHistory = messages.concat([{ role: 'user', name: '系统', content: mentionPrompt }]);
+    return buildApiMessages(targetCat, mentionHistory, false);
+}
+
+function triggerPipelineMentionResponses(sourceCat, sourceReply, chainDepth) {
+    if (gameMode !== 'pipeline') return;
+
+    var depth = Number(chainDepth || 0);
+    if (depth >= 2) return;
+
+    var mentionedCats = parseMentions(String(sourceReply || ''));
+    if (!mentionedCats.length) return;
+
+    var seen = {};
+    var targets = mentionedCats.filter(function(target) {
+        if (!target || !target.id) return false;
+        if (target.id === sourceCat.id) return false;
+        if (wfState.active && wfState.eliminated && wfState.eliminated.includes(target.id)) return false;
+        if (seen[target.id]) return false;
+        seen[target.id] = true;
+        return true;
+    }).slice(0, 3);
+
+    if (!targets.length) return;
+
+    targets.forEach(function(target, idx) {
+        setTimeout(function() {
+            var payload = buildPipelineMentionPayload(target, sourceCat, sourceReply);
+            triggerCatResponse(target, payload, false, { pipelineMentionDepth: depth + 1 });
+        }, 500 + idx * 900 + Math.random() * 600);
+    });
+}
+
 // ====================== API Call ======================
-function triggerCatResponse(cat, chatPayload, isNight) {
+function triggerCatResponse(cat, chatPayload, isNight, options) {
+    var runtimeOptions = options || {};
     addThinkingIndicator(cat);
     var done = function(result) {
         removeThinkingIndicator(cat.id);
@@ -2599,6 +2635,9 @@ function triggerCatResponse(cat, chatPayload, isNight) {
         if (reply) {
             addCatMessage(cat, reply, isNight || false);
             messages.push({ role:'assistant', name:cat.name, content:reply });
+            if (gameMode === 'pipeline') {
+                triggerPipelineMentionResponses(cat, reply, runtimeOptions.pipelineMentionDepth);
+            }
         } else {
             addCatMessage(cat, '喵...（猫猫好像没想好说什么）', isNight || false);
         }
