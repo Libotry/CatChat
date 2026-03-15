@@ -5,7 +5,21 @@ const path = require('path');
 
 const args = process.argv.slice(2);
 const useEnvPrompt = args.includes('--from-env-b64');
-let prompt = args.filter((a) => a !== '--from-env-b64').join(' ').trim();
+
+// Parse --port for server mode (before building prompt so it's excluded)
+let serverPort = parseInt(process.env.CATCHAT_PORT || '3456', 10);
+const filteredArgs = [];
+for (let i = 0; i < args.length; i++) {
+  if (args[i] === '--from-env-b64') continue;
+  if (args[i] === '--port' && args[i + 1]) {
+    serverPort = parseInt(args[i + 1], 10) || 3456;
+    i++; // skip the port value
+    continue;
+  }
+  filteredArgs.push(args[i]);
+}
+
+let prompt = filteredArgs.join(' ').trim();
 if (useEnvPrompt) {
   const b64 = process.env.CATCHAT_PROMPT_B64 || '';
   if (b64) {
@@ -27,8 +41,248 @@ if (verboseEnabled) {
 console.error('ANTHROPIC_MODEL=' + String(process.env.ANTHROPIC_MODEL || ''));
 
 if (!prompt) {
-  console.error('Usage: node minimal-claude.js "<your prompt>"');
-  process.exit(1);
+  // ====================== Server Mode ======================
+  // When run without a prompt, start an HTTP server that accepts
+  // requests from the CatChat frontend and proxies them to Claude CLI.
+  const http = require('http');
+  const https = require('https');
+
+  function setCorsHeaders(res) {
+    res.setHeader('Access-Control-Allow-Origin', '*');
+    res.setHeader('Access-Control-Allow-Methods', 'GET, POST, PUT, DELETE, OPTIONS');
+    res.setHeader('Access-Control-Allow-Headers', '*');
+    res.setHeader('Access-Control-Max-Age', '86400');
+  }
+
+  function readBody(req) {
+    return new Promise((resolve, reject) => {
+      let body = '';
+      req.on('data', (chunk) => { body += chunk; });
+      req.on('end', () => resolve(body));
+      req.on('error', reject);
+    });
+  }
+
+  function sanitizeSwitchCommand(raw) {
+    const s = String(raw || '').trim();
+    if (!s) return '';
+    // Keep this intentionally strict: command name + optional dashes/underscores/dots.
+    if (!/^[a-zA-Z0-9_.-]+$/.test(s)) {
+      throw new Error('切换命令格式非法，仅允许字母数字与 ._-');
+    }
+    return s;
+  }
+
+  function spawnClaudeForPrompt(reqPrompt, timeoutMs, switchCommand) {
+    return new Promise((resolve, reject) => {
+      const scriptPath = __filename;
+      let child;
+
+      if (isWindows && String(switchCommand || '').trim()) {
+        let cmd;
+        try {
+          cmd = sanitizeSwitchCommand(switchCommand);
+        } catch (err) {
+          reject(err);
+          return;
+        }
+
+        const nodeExe = String(process.execPath || 'node').replace(/'/g, "''");
+        const scriptEscaped = String(scriptPath || '').replace(/'/g, "''");
+        const psScript = [
+          "$ErrorActionPreference='Stop'",
+          'if (Test-Path $PROFILE) { . $PROFILE }',
+          cmd,
+          "& '" + nodeExe + "' '" + scriptEscaped + "' --from-env-b64",
+          'exit $LASTEXITCODE'
+        ].join('; ');
+
+        child = spawn('powershell.exe', ['-NoLogo', '-NoProfile', '-Command', psScript], {
+          cwd: __dirname,
+          stdio: ['ignore', 'pipe', 'pipe'],
+          env: Object.assign({}, process.env, {
+            CATCHAT_PROMPT_B64: Buffer.from(String(reqPrompt || ''), 'utf-8').toString('base64')
+          }),
+        });
+      } else {
+        const childArgs = [scriptPath, reqPrompt];
+        child = spawn(process.execPath, childArgs, {
+          cwd: __dirname,
+          stdio: ['ignore', 'pipe', 'pipe'],
+          env: process.env,
+        });
+      }
+
+      let stdout = '';
+      let stderr = '';
+      let settled = false;
+
+      const timer = setTimeout(() => {
+        if (!settled) {
+          settled = true;
+          try { child.kill(); } catch (_) {}
+          reject(new Error('Claude CLI 调用超时（' + timeoutMs + 'ms）'));
+        }
+      }, timeoutMs);
+
+      child.stdout.on('data', (chunk) => { stdout += chunk; });
+      child.stderr.on('data', (chunk) => { stderr += chunk; });
+      child.on('error', (err) => {
+        if (!settled) { settled = true; clearTimeout(timer); reject(err); }
+      });
+      child.on('close', (code) => {
+        if (settled) return;
+        settled = true;
+        clearTimeout(timer);
+        // Filter out status lines from stdout
+        const lines = stdout.split(/\r?\n/).filter((l) => {
+          const t = l.trim();
+          if (!t) return false;
+          if (t.startsWith('[No assistant text found in stream output]')) return false;
+          if (t.startsWith('Claude process exited with code:')) return false;
+          if (t.startsWith('Claude process ended by signal:')) return false;
+          return true;
+        });
+        const replyText = lines.join('\n').trim();
+        if (code === 0 && replyText) {
+          resolve({ reply: replyText, stderr: stderr.trim() });
+        } else {
+          reject(new Error(stderr.trim() || 'Claude CLI 退出码: ' + code));
+        }
+      });
+    });
+  }
+
+  function proxyRequest(targetUrl, method, headers, body) {
+    return new Promise((resolve, reject) => {
+      const parsed = new URL(targetUrl);
+      const transport = parsed.protocol === 'https:' ? https : http;
+      const proxyHeaders = Object.assign({}, headers);
+      delete proxyHeaders['host'];
+      delete proxyHeaders['origin'];
+      delete proxyHeaders['referer'];
+      delete proxyHeaders['connection'];
+      delete proxyHeaders['accept-encoding'];
+      const options = {
+        hostname: parsed.hostname,
+        port: parsed.port || (parsed.protocol === 'https:' ? 443 : 80),
+        path: parsed.pathname + parsed.search,
+        method: method,
+        headers: proxyHeaders,
+        timeout: 120000,
+      };
+      const proxyReq = transport.request(options, (proxyRes) => {
+        let chunks = [];
+        proxyRes.on('data', (chunk) => { chunks.push(chunk); });
+        proxyRes.on('end', () => {
+          resolve({ statusCode: proxyRes.statusCode, headers: proxyRes.headers, body: Buffer.concat(chunks).toString('utf-8') });
+        });
+      });
+      proxyReq.on('error', reject);
+      proxyReq.on('timeout', () => { proxyReq.destroy(); reject(new Error('代理请求超时')); });
+      if (body) proxyReq.write(body);
+      proxyReq.end();
+    });
+  }
+
+  let requestCount = 0;
+  const server = http.createServer(async (req, res) => {
+    setCorsHeaders(res);
+    if (req.method === 'OPTIONS') { res.writeHead(204); res.end(); return; }
+
+    if (req.url === '/health' || req.url === '/ping') {
+      res.writeHead(200, { 'Content-Type': 'application/json' });
+      res.end(JSON.stringify({ status: 'ok', name: 'minimal-claude server', uptime: process.uptime(), requests: requestCount }));
+      return;
+    }
+
+    if (req.url === '/claude-code' && req.method === 'POST') {
+      requestCount++;
+      const reqId = requestCount;
+      try {
+        const raw = await readBody(req);
+        const payload = JSON.parse(raw || '{}');
+        const reqPrompt = String(payload.prompt || '').trim();
+        const timeoutMsRaw = Number(payload.timeoutMs || 240000);
+        const timeoutMs = Number.isFinite(timeoutMsRaw) ? Math.max(10000, Math.min(3600000, timeoutMsRaw)) : 240000;
+        const switchCommand = String(payload.switchCommand || '').trim();
+        if (!reqPrompt) {
+          res.writeHead(400, { 'Content-Type': 'application/json' });
+          res.end(JSON.stringify({ error: '缺少 prompt 参数' }));
+          return;
+        }
+        console.error(`[#${reqId}] 📤 Claude CLI 请求 (${reqPrompt.length} chars)`);
+        if (switchCommand) {
+          console.error(`[#${reqId}] 🔀 模型切换命令: ${switchCommand}`);
+        }
+        const result = await spawnClaudeForPrompt(reqPrompt, timeoutMs, switchCommand);
+        console.error(`[#${reqId}] ✅ 完成`);
+        res.writeHead(200, { 'Content-Type': 'application/json' });
+        res.end(JSON.stringify({ ok: true, reply: result.reply, stderr: result.stderr || '' }));
+      } catch (err) {
+        console.error(`[#${reqId}] ❌ ${err.message}`);
+        res.writeHead(502, { 'Content-Type': 'application/json' });
+        res.end(JSON.stringify({ ok: false, error: String(err && err.message || 'Claude CLI 执行失败') }));
+      }
+      return;
+    }
+
+    if (req.url === '/proxy' && req.method === 'POST') {
+      requestCount++;
+      try {
+        const raw = await readBody(req);
+        const payload = JSON.parse(raw);
+        const targetUrl = payload.targetUrl;
+        if (!targetUrl) {
+          res.writeHead(400, { 'Content-Type': 'application/json' });
+          res.end(JSON.stringify({ error: '缺少 targetUrl 参数' }));
+          return;
+        }
+        const targetBody = payload.body ? (typeof payload.body === 'string' ? payload.body : JSON.stringify(payload.body)) : '';
+        const result = await proxyRequest(targetUrl, payload.method || 'POST', payload.headers || {}, targetBody);
+        res.writeHead(result.statusCode, { 'Content-Type': result.headers['content-type'] || 'application/json' });
+        res.end(result.body);
+      } catch (err) {
+        res.writeHead(502, { 'Content-Type': 'application/json' });
+        res.end(JSON.stringify({ error: '代理请求失败: ' + err.message }));
+      }
+      return;
+    }
+
+    res.writeHead(404, { 'Content-Type': 'application/json' });
+    res.end(JSON.stringify({ error: 'Not Found. 可用端点: POST /claude-code, POST /proxy, GET /health' }));
+  });
+
+  server.listen(serverPort, () => {
+    console.log('');
+    console.log('  🐱 minimal-claude 服务器已启动');
+    console.log('');
+    console.log(`  ✓ 地址:       http://localhost:${serverPort}`);
+    console.log(`  ✓ Claude端点:  POST /claude-code`);
+    console.log(`  ✓ 代理端点:   POST /proxy`);
+    console.log(`  ✓ 健康检查:   GET  /health`);
+    console.log('');
+    console.log('  📋 在 CatChat 前端「本地 CLI 代理」中');
+    console.log(`     填入 http://localhost:${serverPort} 并开启开关即可`);
+    console.log('');
+  });
+
+  server.on('error', (err) => {
+    if (err.code === 'EADDRINUSE') {
+      console.error(`❌ 端口 ${serverPort} 已被占用！使用 --port <端口> 指定其他端口。`);
+    } else {
+      console.error('❌ 服务器错误:', err.message);
+    }
+    process.exit(1);
+  });
+
+  process.on('SIGINT', () => {
+    console.log('\n👋 minimal-claude 服务器已停止。');
+    process.exit(0);
+  });
+
+  // Prevent falling through to single-shot mode
+  return;
 }
 
 function resolveWindowsClaudeCliEntrypoint() {

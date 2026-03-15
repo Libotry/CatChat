@@ -2359,7 +2359,7 @@ function renderMembers() {
                 '<select style="font-size:11px;padding:2px 6px;border:1px solid rgba(0,0,0,0.15);border-radius:6px;background:#fff;color:#111;" onchange="setCatPipelineSwitchCommand(\'' + cat.id + '\', this.value)">' +
                 '<option value=""' + (selected ? '' : ' selected') + '>不切换</option>' +
                 '<option value="use-glm"' + (selected === 'use-glm' ? ' selected' : '') + '>use-glm</option>' +
-                '<option value="use-minimax"' + (selected === 'use-minimax' ? ' selected' : '') + '>use-minimax</option>' +
+                '<option value="use-opus46"' + (selected === 'use-opus46' ? ' selected' : '') + '>use-opus46</option>' +
                 '<option value="use-kimi"' + (selected === 'use-kimi' ? ' selected' : '') + '>use-kimi</option>' +
                 '</select>' +
                 '</div>';
@@ -2373,8 +2373,8 @@ function setCatPipelineSwitchCommand(catId, cmd) {
     var cat = cats.find(function(c) { return c.id === catId; });
     if (!cat) return;
     var next = String(cmd || '').trim();
-    if (next !== '' && next !== 'use-glm' && next !== 'use-minimax' && next !== 'use-kimi') {
-        showToast('⚠️ 仅支持 use-glm / use-minimax / use-kimi');
+    if (next !== '' && next !== 'use-glm' && next !== 'use-opus46' && next !== 'use-kimi') {
+        showToast('⚠️ 仅支持 use-glm / use-opus46 / use-kimi');
         return;
     }
     cat.pipelineSwitchCommand = next;
