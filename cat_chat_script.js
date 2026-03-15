@@ -1878,34 +1878,63 @@ function normalizePipelineCliPort(raw, fallback) {
     return p;
 }
 
-function syncPipelineCliAgents() {
+function buildCatCliBaseUrl(port) {
     var inputUrlEl = document.getElementById('cliProxyUrl');
     var proxyUrl = ((inputUrlEl && inputUrlEl.value) ? inputUrlEl.value : cliProxy.url || 'http://localhost:3456').trim().replace(/\/+$/, '') || 'http://localhost:3456';
     cliProxy.url = proxyUrl;
+    var parsed;
+    try {
+        parsed = new URL(proxyUrl);
+    } catch (_) {
+        parsed = new URL('http://localhost:3456');
+    }
+    var safePort = normalizePipelineCliPort(port, suggestPipelineCliPort());
+    return parsed.protocol + '//' + parsed.hostname + ':' + safePort;
+}
 
-    var payload = {
-        cats: cats.map(function(cat) {
+function syncPipelineCliAgents() {
+    var checks = cats.map(function(cat) {
+        var port = normalizePipelineCliPort(cat.pipelineCliPort, suggestPipelineCliPort());
+        var baseUrl = buildCatCliBaseUrl(port);
+        return fetch(baseUrl + '/health', { method: 'GET' }).then(function(resp) {
+            if (!resp.ok) throw new Error('HTTP ' + resp.status);
+            return resp.json().then(function(body) {
+                if (!body || body.status !== 'ok') throw new Error('health 返回异常');
+                return {
+                    catId: String(cat.id || ''),
+                    catName: String(cat.name || ''),
+                    port: port,
+                    switchCommand: String(cat.pipelineSwitchCommand || '').trim(),
+                    status: 'connected',
+                    baseUrl: baseUrl
+                };
+            });
+        }).catch(function(err) {
             return {
                 catId: String(cat.id || ''),
                 catName: String(cat.name || ''),
-                port: normalizePipelineCliPort(cat.pipelineCliPort, suggestPipelineCliPort()),
+                port: port,
                 switchCommand: String(cat.pipelineSwitchCommand || '').trim(),
-                autoResolvePortConflict: true
+                status: 'offline',
+                baseUrl: baseUrl,
+                error: String(err && err.message || '连接失败')
             };
-        })
-    };
+        });
+    });
 
-    return fetch(proxyUrl + '/pipeline/sync', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify(payload)
-    }).then(function(response) {
-        if (!response.ok) {
-            return response.text().then(function(t) {
-                throw new Error('同步猫猫 CLI 失败 (' + response.status + '): ' + t.substring(0, 260));
-            });
+    return Promise.all(checks).then(function(agents) {
+        var offline = agents.filter(function(a) { return a.status !== 'connected'; });
+        if (offline.length > 0) {
+            var first = offline[0];
+            throw new Error('检测到未启动的猫猫 CLI：' + first.catName + ' @' + first.port + '。请先在独立窗口执行 node cat_chat_cli.js --port ' + first.port);
         }
-        return response.json();
+        return {
+            ok: true,
+            manual: true,
+            agents: agents,
+            started: 0,
+            reused: agents.length
+        };
     });
 }
 
@@ -1950,16 +1979,15 @@ function pipelineRenderCliStatus(syncData, errMsg) {
     }
 
     var lines = [];
-    lines.push('<div style="font-weight:600;margin-bottom:4px;">🐾 猫猫进程状态</div>');
+    lines.push('<div style="font-weight:600;margin-bottom:4px;">🐾 猫猫进程状态（手动模式）</div>');
     agents.forEach(function(a) {
         var status = String(a.status || 'unknown');
-        var icon = status === 'started' ? '🟢' : (status === 'reused' ? '🔵' : '⚪');
-        var requestedPort = String((a && a.requestedPort) || (a && a.port) || '-');
-        var actualPort = String((a && a.port) || '-');
-        var portLabel = requestedPort === actualPort ? actualPort : (requestedPort + ' → ' + actualPort);
+        var online = status === 'connected';
+        var icon = online ? '🟢' : '🔴';
+        var portLabel = String((a && a.port) || '-');
         lines.push('<div class="pp-step">' +
-            '<span class="pp-step-badge ' + (status === 'started' ? 'pp-step-active' : 'pp-step-done') + '">' + icon + ' ' + escapeHtml(status) + '</span>' +
-            ' ' + escapeHtml(String(a.catName || a.catId || 'cat')) + ' @ ' + escapeHtml(portLabel) +
+            '<span class="pp-step-badge ' + (online ? 'pp-step-done' : 'pp-step-waiting') + '">' + icon + ' ' + escapeHtml(status) + '</span>' +
+            ' ' + escapeHtml(String(a.catName || a.catId || 'cat')) + ' @ ' + escapeHtml(portLabel) + (a && a.error ? (' · ' + escapeHtml(String(a.error || ''))) : '') +
             '</div>');
     });
     el.style.display = 'block';
@@ -1987,18 +2015,17 @@ function pipelineSyncCliNow() {
         showToast('⚠️ 请先添加至少 1 只猫猫');
         return;
     }
-    addSystemMessage('🔌 正在同步猫猫专属 CLI 进程...', 'pipeline-msg');
+    addSystemMessage('🔌 正在检查每只猫猫的手动 CLI 窗口是否已启动...', 'pipeline-msg');
     syncPipelineCliAgents().then(function(syncData) {
-        pipelineApplySyncedPorts(syncData);
         pipelineRenderCliStatus(syncData, '');
         var summary = (syncData && Array.isArray(syncData.agents))
             ? syncData.agents.map(function(a) { return String(a.catName || a.catId || 'cat') + ':' + String(a.port || '-'); }).join(' / ')
             : '';
-        addSystemMessage('✅ 猫猫进程同步完成' + (summary ? '：' + summary : ''), 'pipeline-msg');
+        addSystemMessage('✅ 猫猫手动 CLI 检查通过' + (summary ? '：' + summary : ''), 'pipeline-msg');
     }).catch(function(err) {
         var msg = String(err && err.message || '同步失败');
         pipelineRenderCliStatus(null, msg);
-        addSystemMessage('❌ 猫猫进程同步失败：' + msg, 'pipeline-msg');
+        addSystemMessage('❌ 猫猫手动 CLI 检查失败：' + msg, 'pipeline-msg');
     });
 }
 
@@ -2053,10 +2080,9 @@ function pipelineStart() {
         return cat.name + '=' + (String(cat.pipelineSwitchCommand || '').trim() || '-');
     }).join(' / ');
     document.getElementById('ppStartBtn').disabled = true;
-    addSystemMessage('🔌 正在为每只猫猫分配并启动专属 CLI 端口...', 'pipeline-msg');
+    addSystemMessage('🔌 正在检查每只猫猫对应端口的手动 CLI 窗口...', 'pipeline-msg');
 
     syncPipelineCliAgents().then(function(syncData) {
-        pipelineApplySyncedPorts(syncData);
         pipelineRenderCliStatus(syncData, '');
         var portSummary = (syncData && Array.isArray(syncData.agents))
             ? syncData.agents.map(function(a) { return String(a.catName || a.catId || 'cat') + ':' + String(a.port || '-'); }).join(' / ')
@@ -2081,7 +2107,7 @@ function pipelineStart() {
         addSystemMessage('⏱️ 单任务超时：' + timeoutSec + ' 秒', 'pipeline-msg');
         addSystemMessage('🔀 模型切换：' + roleSwitchSummary, 'pipeline-msg');
         addSystemMessage('🧩 专属 CLI 端口：' + portSummary, 'pipeline-msg');
-        addSystemMessage('🤖 Claude Code CLI 多实例模式已启用：每只猫通过各自端口连接后端进程。', 'pipeline-msg');
+        addSystemMessage('🤖 Claude Code CLI 手动多窗口模式：请确保每只猫已手动运行 node cat_chat_cli.js --port <端口>。', 'pipeline-msg');
         addSystemMessage('🛠️ 阶段一：' + plState.roles.developer.emoji + ' ' + plState.roles.developer.name + ' 正在进行模块设计与代码开发...', 'pipeline-dev-msg');
         var devCat = plState.roles.developer;
         var devRole = PIPELINE_ROLES.developer;
@@ -2093,7 +2119,7 @@ function pipelineStart() {
     }).catch(function(err) {
         document.getElementById('ppStartBtn').disabled = false;
         document.getElementById('ppResetBtn').disabled = true;
-        var msg = String(err && err.message || '同步猫猫 CLI 失败');
+        var msg = String(err && err.message || '检查猫猫 CLI 失败');
         pipelineRenderCliStatus(null, msg);
         addSystemMessage('❌ 无法启动流水线：' + msg, 'pipeline-msg');
         showToast('❌ ' + msg);
@@ -2161,9 +2187,6 @@ function buildPipelineClaudePrompt(cat, chatPayload, phase) {
 }
 
 function callPipelineClaudeCodeCLI(cat, chatPayload, phase) {
-    var inputUrlEl = document.getElementById('cliProxyUrl');
-    var proxyUrl = ((inputUrlEl && inputUrlEl.value) ? inputUrlEl.value : cliProxy.url || 'http://localhost:3456').trim().replace(/\/+$/, '') || 'http://localhost:3456';
-    cliProxy.url = proxyUrl;
     var prompt = buildPipelineClaudePrompt(cat, chatPayload, phase);
     var msgs = Array.isArray(chatPayload && chatPayload.messages) ? chatPayload.messages : [];
     var taskPreview = '';
@@ -2175,8 +2198,9 @@ function callPipelineClaudeCodeCLI(cat, chatPayload, phase) {
     }
     var switchCommand = String((cat && cat.pipelineSwitchCommand) || '').trim();
     var catCliPort = normalizePipelineCliPort(cat && cat.pipelineCliPort, suggestPipelineCliPort());
+    var catBaseUrl = buildCatCliBaseUrl(catCliPort);
     var workDir = pipelineResolveWorkDir();
-    return fetch(proxyUrl + '/claude-code', {
+    return fetch(catBaseUrl + '/claude-code', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({
@@ -2185,8 +2209,6 @@ function callPipelineClaudeCodeCLI(cat, chatPayload, phase) {
             source: 'pipeline',
             phase: String(phase || ''),
             catName: String((cat && cat.name) || ''),
-            catId: String((cat && cat.id) || ''),
-            catCliPort: catCliPort,
             taskPreview: taskPreview,
             workingDir: workDir,
             outputDir: workDir || String(plState.outputDir || ''),
@@ -2223,7 +2245,7 @@ function callPipelineClaudeCodeCLI(cat, chatPayload, phase) {
         updateCliStatusDot('error');
         var message = String(err && err.message || 'Claude Code 调用失败');
         if (/Failed to fetch|NetworkError|fetch/i.test(message)) {
-            message = '无法连接本地 CLI 代理（' + proxyUrl + '）。请先运行 `node cat_chat_cli.js`，或检查代理地址后重试。';
+            message = '无法连接猫猫 CLI（' + catBaseUrl + '）。请先在独立窗口执行 node cat_chat_cli.js --port ' + catCliPort;
         }
         throw new Error(message);
     });

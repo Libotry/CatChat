@@ -15,6 +15,7 @@ const { spawn, spawnSync } = require('child_process');
 
 // ====================== Config ======================
 const DEFAULT_PORT = 3456;
+const PROXY_TIMEOUT_MS = 3600000;
 let PORT = DEFAULT_PORT;
 
 // Parse CLI arguments
@@ -93,7 +94,7 @@ function proxyRequest(targetUrl, method, headers, body) {
             path: parsed.pathname + parsed.search,
             method: method,
             headers: proxyHeaders,
-            timeout: 120000
+            timeout: PROXY_TIMEOUT_MS
         };
 
         const proxyReq = transport.request(options, function(proxyRes) {
@@ -115,7 +116,7 @@ function proxyRequest(targetUrl, method, headers, body) {
 
         proxyReq.on('timeout', function() {
             proxyReq.destroy();
-            reject(new Error('代理请求超时 (120s)'));
+            reject(new Error('代理请求超时 (3600s)'));
         });
 
         if (body) {
@@ -785,41 +786,13 @@ const server = http.createServer(function(req, res) {
     }
 
     if (req.url === '/pipeline/sync' && req.method === 'POST') {
-        let body = '';
-        req.on('data', function(chunk) { body += chunk; });
-        req.on('end', function() {
-            let payload;
-            try {
-                payload = JSON.parse(body || '{}');
-            } catch (_) {
-                res.writeHead(400, { 'Content-Type': 'application/json' });
-                res.end(JSON.stringify({ ok: false, error: '无法解析请求体 JSON' }));
-                return;
-            }
-
-            const cats = Array.isArray(payload.cats) ? payload.cats : [];
-            if (!cats.length) {
-                res.writeHead(400, { 'Content-Type': 'application/json' });
-                res.end(JSON.stringify({ ok: false, error: '缺少 cats 参数' }));
-                return;
-            }
-
-            log('🧩', C.cyan, 'PIPELINE SYNC', '准备同步 ' + cats.length + ' 只猫猫的 CLI 进程');
-            syncPipelineCliAgents(cats).then(function(results) {
-                const started = results.filter(function(x) { return x.status === 'started'; }).length;
-                const reused = results.filter(function(x) { return x.status === 'reused'; }).length;
-                log('✅', C.green, 'PIPELINE SYNC', '完成，started=' + started + ', reused=' + reused);
-                results.forEach(function(a) {
-                    log('  ', C.dim, '  CAT', String(a.catName || a.catId) + ' @' + String(a.requestedPort || a.port) + (a.reassigned ? '->' + String(a.port) : '') + ' [' + String(a.switchCommand || '-') + '] pid=' + String(a.pid || '-'));
-                });
-                res.writeHead(200, { 'Content-Type': 'application/json' });
-                res.end(JSON.stringify({ ok: true, agents: results, started: started, reused: reused }));
-            }).catch(function(err) {
-                log('❌', C.red, 'PIPELINE SYNC', String(err && err.message || 'failed'));
-                res.writeHead(502, { 'Content-Type': 'application/json' });
-                res.end(JSON.stringify({ ok: false, error: String(err && err.message || '同步失败') }));
-            });
-        });
+        // Manual mode: user starts one CLI instance per cat port by themselves.
+        res.writeHead(400, { 'Content-Type': 'application/json' });
+        res.end(JSON.stringify({
+            ok: false,
+            mode: 'manual',
+            error: '当前为手动多窗口模式：请为每只猫手动启动独立实例，例如 node cat_chat_cli.js --port 3460'
+        }));
         return;
     }
 
@@ -983,15 +956,7 @@ const server = http.createServer(function(req, res) {
             }
 
             const startTime = Date.now();
-            const runPromise = (source === 'pipeline' && catCliPort && catId)
-                ? ensurePipelineCliAgent({ catId: catId, catName: catName || catId, port: catCliPort, switchCommand: switchCommand }).then(function() {
-                    return callDedicatedCliServer(catCliPort, {
-                        prompt: prompt,
-                        timeoutMs: timeoutMs,
-                        workingDir: workingDir
-                    });
-                })
-                : runMinimalClaude(prompt, timeoutMs, switchCommand, workingDir, function(model) {
+            const runPromise = runMinimalClaude(prompt, timeoutMs, switchCommand, workingDir, function(model) {
                     log('  ', C.dim, '  ANTHROPIC_MODEL', model || '(empty)');
                 }, function(stream, line) {
                     const channel = stream === 'stderr' ? 'CLI[err]' : 'CLI[out]';

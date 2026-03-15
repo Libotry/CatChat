@@ -31,6 +31,7 @@ if (useEnvPrompt) {
 const isWindows = process.platform === 'win32';
 const claudeBin = process.env.CLAUDE_BIN || 'claude';
 const verboseEnabled = String(process.env.CATCHAT_CLI_VERBOSE || '').trim() === '1';
+const PROXY_TIMEOUT_MS = 3600000;
 const claudeArgs = ['-p', prompt];
 if (verboseEnabled) {
   // Claude CLI requires --verbose when using --print (-p) with stream-json output.
@@ -191,7 +192,7 @@ if (!prompt) {
         path: parsed.pathname + parsed.search,
         method: method,
         headers: proxyHeaders,
-        timeout: 120000,
+        timeout: PROXY_TIMEOUT_MS,
       };
       const proxyReq = transport.request(options, (proxyRes) => {
         let chunks = [];
@@ -201,7 +202,7 @@ if (!prompt) {
         });
       });
       proxyReq.on('error', reject);
-      proxyReq.on('timeout', () => { proxyReq.destroy(); reject(new Error('代理请求超时')); });
+      proxyReq.on('timeout', () => { proxyReq.destroy(); reject(new Error('代理请求超时 (3600s)')); });
       if (body) proxyReq.write(body);
       proxyReq.end();
     });
