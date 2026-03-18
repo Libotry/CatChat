@@ -398,6 +398,25 @@
                 <div class="mode-card" data-mode="monitor" onclick="switchMode('monitor')"><div class="mode-icon">🛰️</div><div class="mode-label">联动观测</div></div>
             </div>
         </div>
+        <div class="mode-section" id="autoChatSection" style="padding:8px 20px 12px;">
+            <div style="display:flex;align-items:center;justify-content:space-between;">
+                <span style="font-size:13px;font-weight:600;">🐾 猫猫自由聊天</span>
+                <label class="cli-switch"><input type="checkbox" id="autoChatEnabled" onchange="onAutoChatToggle()"><span class="cli-slider"></span></label>
+            </div>
+            <div id="autoChatSettings" style="display:none;margin-top:8px;">
+                <div style="font-size:11px;color:var(--text-secondary);margin-bottom:8px;line-height:1.5;">开启后猫猫会自主发起话题、互相接话，不需要铲屎官说话也能自己聊起来。</div>
+                <div style="display:flex;align-items:center;gap:8px;margin-bottom:6px;">
+                    <span style="font-size:12px;white-space:nowrap;">安静触发</span>
+                    <input type="range" id="autoChatIdleRange" min="15" max="120" value="30" style="flex:1;" oninput="document.getElementById('autoChatIdleLabel').textContent=this.value+'s'">
+                    <span id="autoChatIdleLabel" style="font-size:11px;color:var(--text-secondary);min-width:30px;">30s</span>
+                </div>
+                <div style="display:flex;align-items:center;gap:8px;">
+                    <span style="font-size:12px;white-space:nowrap;">接话概率</span>
+                    <input type="range" id="autoChatReactRange" min="0" max="100" value="40" style="flex:1;" oninput="document.getElementById('autoChatReactLabel').textContent=this.value+'%'">
+                    <span id="autoChatReactLabel" style="font-size:11px;color:var(--text-secondary);min-width:30px;">40%</span>
+                </div>
+            </div>
+        </div>
         <div class="debate-panel" id="debatePanel">
             <div class="db-title">🎯 辩论赛控制台</div>
             <div class="db-info">铲屎官出议题，猫猫们按顺序轮流发言。每只猫说完后才轮到下一只。</div>

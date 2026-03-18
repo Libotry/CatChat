@@ -14,6 +14,9 @@ from app.config.frontend_profile_env import load_frontend_profile
 from app.api.rest import router as rest_router
 from app.websocket.handler import ws_manager
 
+from app.api.mcp_routes import router as mcp_router
+from app.api.autonomous_chat_routes import router as autonomous_chat_router
+
 logger = logging.getLogger(__name__)
 
 app = FastAPI(
@@ -31,6 +34,10 @@ app.add_middleware(
 )
 
 app.include_router(rest_router)
+
+app.include_router(mcp_router)
+
+app.include_router(autonomous_chat_router)
 
 
 @app.get("/health")

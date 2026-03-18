@@ -98,6 +98,19 @@ let monitorState = {
 };
 let monitorForceApplying = false;
 
+// ====================== Autonomous Chat State ======================
+let autoChat = {
+    enabled: false,
+    idleSeconds: 30,
+    reactChance: 0.4,
+    idleTimer: null,
+    lastActivityTime: Date.now(),
+    consecutiveAuto: 0,
+    maxConsecutive: 3,
+    reacting: false
+};
+const AUTOCHAT_STORAGE_KEY = 'catchat.autochat.config.v1';
+
 let ttsState = {
     enabled: true,
     rate: 1,
@@ -902,6 +915,9 @@ function init() {
     monitorInit();
     monitorSyncPlayerCountFromCats();
     loadCatsFromBackendEnvProfile();
+    autoChatLoadConfig();
+    autoChatUpdateUI();
+    if (autoChat.enabled) autoChatStartIdleTimer();
 }
 
 function pipelineInitOutputDir() {
@@ -2758,8 +2774,213 @@ function removeThinkingIndicator(catId) {
     if (el) el.remove();
 }
 
+// ====================== Autonomous Chat ======================
+function autoChatSaveConfig() {
+    try {
+        localStorage.setItem(AUTOCHAT_STORAGE_KEY, JSON.stringify({
+            enabled: !!autoChat.enabled,
+            idleSeconds: Number(autoChat.idleSeconds),
+            reactChance: Number(autoChat.reactChance)
+        }));
+    } catch (_) {}
+}
+
+function autoChatLoadConfig() {
+    try {
+        var raw = localStorage.getItem(AUTOCHAT_STORAGE_KEY);
+        if (!raw) return;
+        var cfg = JSON.parse(raw);
+        if (!cfg || typeof cfg !== 'object') return;
+        if (typeof cfg.enabled === 'boolean') autoChat.enabled = cfg.enabled;
+        if (Number.isFinite(cfg.idleSeconds)) autoChat.idleSeconds = Math.max(15, Math.min(120, cfg.idleSeconds));
+        if (Number.isFinite(cfg.reactChance)) autoChat.reactChance = Math.max(0, Math.min(1, cfg.reactChance));
+    } catch (_) {}
+}
+
+function autoChatUpdateUI() {
+    var cb = document.getElementById('autoChatEnabled');
+    var settings = document.getElementById('autoChatSettings');
+    var idleRange = document.getElementById('autoChatIdleRange');
+    var idleLabel = document.getElementById('autoChatIdleLabel');
+    var reactRange = document.getElementById('autoChatReactRange');
+    var reactLabel = document.getElementById('autoChatReactLabel');
+    if (!cb) return;
+    cb.checked = autoChat.enabled;
+    if (settings) settings.style.display = autoChat.enabled ? 'block' : 'none';
+    if (idleRange) idleRange.value = String(autoChat.idleSeconds);
+    if (idleLabel) idleLabel.textContent = autoChat.idleSeconds + 's';
+    if (reactRange) reactRange.value = String(Math.round(autoChat.reactChance * 100));
+    if (reactLabel) reactLabel.textContent = Math.round(autoChat.reactChance * 100) + '%';
+}
+
+function onAutoChatToggle() {
+    var cb = document.getElementById('autoChatEnabled');
+    autoChat.enabled = cb && cb.checked;
+    var settings = document.getElementById('autoChatSettings');
+    if (settings) settings.style.display = autoChat.enabled ? 'block' : 'none';
+    if (autoChat.enabled) {
+        autoChat.lastActivityTime = Date.now();
+        autoChat.consecutiveAuto = 0;
+        autoChatStartIdleTimer();
+        showToast('🐾 猫猫自由聊天已开启！猫猫会自己聊天啦～');
+    } else {
+        autoChatStopIdleTimer();
+        showToast('🐾 猫猫自由聊天已关闭');
+    }
+    autoChatSaveConfig();
+}
+
+function autoChatReadUISettings() {
+    var idleRange = document.getElementById('autoChatIdleRange');
+    var reactRange = document.getElementById('autoChatReactRange');
+    if (idleRange) autoChat.idleSeconds = parseInt(idleRange.value, 10);
+    if (reactRange) autoChat.reactChance = parseInt(reactRange.value, 10) / 100;
+    autoChatSaveConfig();
+}
+
+function autoChatMarkActivity() {
+    autoChat.lastActivityTime = Date.now();
+    autoChat.consecutiveAuto = 0;
+    if (autoChat.enabled) autoChatStartIdleTimer();
+}
+
+function autoChatStartIdleTimer() {
+    autoChatStopIdleTimer();
+    if (!autoChat.enabled) return;
+    autoChatReadUISettings();
+    autoChat.idleTimer = setInterval(function() {
+        if (!autoChat.enabled || cats.length === 0) return;
+        if (gameMode !== 'discuss') return;
+        if (autoChat.consecutiveAuto >= autoChat.maxConsecutive) return;
+        var elapsed = (Date.now() - autoChat.lastActivityTime) / 1000;
+        if (elapsed >= autoChat.idleSeconds) {
+            autoChat.lastActivityTime = Date.now();
+            autoChatTriggerIdle();
+        }
+    }, 5000);
+}
+
+function autoChatStopIdleTimer() {
+    if (autoChat.idleTimer) {
+        clearInterval(autoChat.idleTimer);
+        autoChat.idleTimer = null;
+    }
+}
+
+function autoChatPickRandomCat(excludeId) {
+    var pool = cats.filter(function(c) { return c.id !== excludeId; });
+    if (pool.length === 0) pool = cats.slice();
+    if (pool.length === 0) return null;
+    return pool[Math.floor(Math.random() * pool.length)];
+}
+
+function autoChatBuildPrompt(cat, trigger) {
+    var base = cat.personality + '\n\n【聊天室规则】\n- 你在一个有多只猫猫和铲屎官的聊天室里。\n- 请用简短自然的口吻说话（15-60字左右）。\n- 可以用"喵"等语气词，但不要每句话都用。\n- 保持自己的性格特点。';
+
+    if (trigger === 'idle') {
+        base += '\n\n【当前情况】\n聊天室安静了一会儿。你作为一只有自主意识的猫猫，现在想主动说点什么。';
+        base += '\n可以是：分享心情、吐槽天气、聊聊最近的趣事、撒个娇、跟其他猫或铲屎官搭话。';
+        base += '\n直接说你想说的话，不要加任何前缀或解释。';
+    } else if (trigger === 'react') {
+        base += '\n\n【当前情况】\n你刚刚看到聊天室里其他猫的发言，你想接话或回应。';
+        base += '\n请自然地接话，可以附和、反驳、补充、开玩笑，保持你的性格。';
+        base += '\n直接说你想说的话，不要加任何前缀或解释。';
+    }
+    return base;
+}
+
+function autoChatTriggerIdle() {
+    if (cats.length === 0 || autoChat.reacting) return;
+    var cat = autoChatPickRandomCat(null);
+    if (!cat) return;
+
+    autoChat.reacting = true;
+    var systemPrompt = autoChatBuildPrompt(cat, 'idle');
+    var recentMsgs = messages.slice(-10).map(function(m) {
+        return { role: m.name === cat.name ? 'assistant' : 'user', content: '[' + m.name + ']: ' + m.content };
+    });
+    if (recentMsgs.length === 0) {
+        recentMsgs = [{ role: 'user', content: '[系统]: 聊天室刚刚开启，大家自由聊天吧！' }];
+    }
+    var payload = { system: systemPrompt, messages: recentMsgs };
+
+    addThinkingIndicator(cat);
+    var done = function(result) {
+        removeThinkingIndicator(cat.id);
+        autoChat.reacting = false;
+        var reply = (result && typeof result === 'object') ? String(result.reply || '').trim() : String(result || '').trim();
+        if (reply) {
+            addCatMessage(cat, reply, false);
+            messages.push({ role: 'assistant', name: cat.name, content: reply });
+            autoChat.consecutiveAuto++;
+            autoChat.lastActivityTime = Date.now();
+            autoChatMaybeReact(cat, reply);
+        }
+    };
+    var fail = function(err) {
+        removeThinkingIndicator(cat.id);
+        autoChat.reacting = false;
+        console.error('[AutoChat] idle trigger error:', err);
+    };
+    if (catUsesClaudeFormat(cat)) {
+        callClaudeAPI(cat, payload).then(done).catch(fail);
+    } else {
+        callOpenAIAPI(cat, payload).then(done).catch(fail);
+    }
+}
+
+function autoChatMaybeReact(sourceCat, sourceReply) {
+    if (!autoChat.enabled || gameMode !== 'discuss') return;
+    if (autoChat.consecutiveAuto >= autoChat.maxConsecutive) return;
+    if (cats.length < 2) return;
+
+    autoChatReadUISettings();
+    if (Math.random() > autoChat.reactChance) return;
+
+    var reactCat = autoChatPickRandomCat(sourceCat.id);
+    if (!reactCat) return;
+
+    var delay = 3000 + Math.random() * 8000;
+    setTimeout(function() {
+        if (!autoChat.enabled || autoChat.reacting) return;
+        if (autoChat.consecutiveAuto >= autoChat.maxConsecutive) return;
+
+        autoChat.reacting = true;
+        var systemPrompt = autoChatBuildPrompt(reactCat, 'react');
+        var recentMsgs = messages.slice(-10).map(function(m) {
+            return { role: m.name === reactCat.name ? 'assistant' : 'user', content: '[' + m.name + ']: ' + m.content };
+        });
+        var payload = { system: systemPrompt, messages: recentMsgs };
+
+        addThinkingIndicator(reactCat);
+        var done = function(result) {
+            removeThinkingIndicator(reactCat.id);
+            autoChat.reacting = false;
+            var reply = (result && typeof result === 'object') ? String(result.reply || '').trim() : String(result || '').trim();
+            if (reply) {
+                addCatMessage(reactCat, reply, false);
+                messages.push({ role: 'assistant', name: reactCat.name, content: reply });
+                autoChat.consecutiveAuto++;
+                autoChat.lastActivityTime = Date.now();
+                autoChatMaybeReact(reactCat, reply);
+            }
+        };
+        var fail = function(err) {
+            removeThinkingIndicator(reactCat.id);
+            autoChat.reacting = false;
+            console.error('[AutoChat] react trigger error:', err);
+        };
+        if (catUsesClaudeFormat(reactCat)) {
+            callClaudeAPI(reactCat, payload).then(done).catch(fail);
+        } else {
+            callOpenAIAPI(reactCat, payload).then(done).catch(fail);
+        }
+    }, delay);
+}
+
 // ====================== Send Message ======================
 function sendMessage() {
+    autoChatMarkActivity();
     var input = document.getElementById('messageInput');
     var text = input.value.trim();
     if (!text) return;
@@ -2888,6 +3109,148 @@ function triggerPipelineMentionResponses(sourceCat, sourceReply, chainDepth) {
     });
 }
 
+// ====================== Pipeline Auto-React (自主接话) ======================
+var pipelineAutoReact = {
+    reacting: false,
+    consecutiveAuto: 0,
+    maxConsecutive: 4,
+    lastAutoTime: 0
+};
+
+function pipelineAutoReactReset() {
+    pipelineAutoReact.reacting = false;
+    pipelineAutoReact.consecutiveAuto = 0;
+    pipelineAutoReact.lastAutoTime = 0;
+}
+
+function pipelineAutoReactMarkUserActivity() {
+    pipelineAutoReact.consecutiveAuto = 0;
+}
+
+function pipelineAutoReactBuildPrompt(cat, sourceCatName) {
+    var recentMsgs = messages.slice(-12);
+    var dialog = recentMsgs.map(function(m) {
+        return '[' + (m.name || (m.role === 'user' ? '铲屎官' : '未知')) + ']: ' + m.content;
+    }).join('\n');
+
+    var otherCatNames = cats.filter(function(c) { return c.id !== cat.id; }).map(function(c) { return c.name; });
+    var workDir = pipelineResolveWorkDir();
+    var workDirHint = workDir ? '\n工作目录：' + workDir + '\n' : '';
+
+    return [
+        '你是 ' + cat.name + '，在 CatChat 流水线的多猫协作讨论中。',
+        cat.personality || '',
+        workDirHint,
+        '【聊天室最近消息】',
+        dialog,
+        '',
+        '【你的任务】',
+        '请阅读以上聊天记录，决定你是否有必要发言。',
+        '',
+        '需要发言的情况：',
+        '- 有人 @了你或提到了你的名字',
+        '- 你对某个技术问题有不同看法或补充',
+        '- 你发现了代码中的问题或改进点',
+        '- 讨论涉及你擅长的领域',
+        '- 你有重要信息需要分享',
+        '',
+        '不需要发言的情况：',
+        '- 别人已经说得很完整了，你没有新信息',
+        '- 话题跟你关系不大',
+        '- 只是简单的确认或附和（不值得单独发言）',
+        '',
+        '【输出规则】',
+        '- 如果你决定发言，直接输出你想说的内容（使用 Markdown，中文）',
+        '- 如果你觉得不需要发言，只输出这四个字：[不发言]',
+        '- 不要加任何前缀、解释或额外说明',
+        '- 保持简洁专业，可以带一点点猫咪口吻，但内容要有价值'
+    ].join('\n');
+}
+
+function pipelineMaybeAutoReact(sourceCat, sourceReply) {
+    if (gameMode !== 'pipeline') return;
+    if (!autoChat.enabled) return;
+    if (pipelineAutoReact.reacting) return;
+    if (pipelineAutoReact.consecutiveAuto >= pipelineAutoReact.maxConsecutive) return;
+    if (cats.length < 2) return;
+
+    autoChatReadUISettings();
+    if (Math.random() > autoChat.reactChance) return;
+
+    // Pick a random cat that is NOT the source
+    var pool = cats.filter(function(c) { return c.id !== sourceCat.id; });
+    if (pool.length === 0) return;
+    var reactCat = pool[Math.floor(Math.random() * pool.length)];
+
+    var delay = 2000 + Math.random() * 6000;
+    setTimeout(function() {
+        if (!autoChat.enabled || pipelineAutoReact.reacting) return;
+        if (gameMode !== 'pipeline') return;
+        if (pipelineAutoReact.consecutiveAuto >= pipelineAutoReact.maxConsecutive) return;
+
+        pipelineAutoReact.reacting = true;
+
+        var prompt = pipelineAutoReactBuildPrompt(reactCat, sourceCat.name);
+        var chatPayload = {
+            system: prompt,
+            messages: [{ role: 'user', content: '请阅读聊天记录并决定是否发言。' }]
+        };
+
+        addThinkingIndicator(reactCat);
+
+        var done = function(result) {
+            removeThinkingIndicator(reactCat.id);
+            pipelineAutoReact.reacting = false;
+
+            var reply = (result && typeof result === 'object') ? String(result.reply || '').trim() : String(result || '').trim();
+
+            // Cat decided not to speak
+            if (!reply || reply.indexOf('[不发言]') !== -1 || reply === '不发言') {
+                console.log('[PipelineAutoReact] ' + reactCat.name + ' 决定不发言');
+                return;
+            }
+
+            // Clean up any prefix the model might add
+            reply = reply.replace(/^\[?不?发言\]?\s*/g, '').trim();
+            if (!reply) return;
+
+            addCatMessage(reactCat, reply, false);
+            messages.push({ role: 'assistant', name: reactCat.name, content: reply });
+            pipelineAutoReact.consecutiveAuto++;
+            pipelineAutoReact.lastAutoTime = Date.now();
+
+            // The reply may contain @mentions, trigger those
+            triggerPipelineMentionResponses(reactCat, reply, 0);
+
+            // Chain reaction: maybe another cat wants to react too
+            pipelineMaybeAutoReact(reactCat, reply);
+        };
+
+        var fail = function(err) {
+            removeThinkingIndicator(reactCat.id);
+            pipelineAutoReact.reacting = false;
+            console.error('[PipelineAutoReact] ' + reactCat.name + ' error:', err);
+        };
+
+        // Use pipeline CLI if available, otherwise fall back to API
+        if (isPipelineApiManagedMode()) {
+            callPipelineClaudeCodeCLI(reactCat, chatPayload, 'chat').then(done).catch(function(cliErr) {
+                // Fallback to API if CLI fails
+                console.warn('[PipelineAutoReact] CLI failed, trying API fallback:', cliErr.message);
+                if (catUsesClaudeFormat(reactCat)) {
+                    callClaudeAPI(reactCat, chatPayload).then(done).catch(fail);
+                } else {
+                    callOpenAIAPI(reactCat, chatPayload).then(done).catch(fail);
+                }
+            });
+        } else if (catUsesClaudeFormat(reactCat)) {
+            callClaudeAPI(reactCat, chatPayload).then(done).catch(fail);
+        } else {
+            callOpenAIAPI(reactCat, chatPayload).then(done).catch(fail);
+        }
+    }, delay);
+}
+
 // ====================== API Call ======================
 function triggerCatResponse(cat, chatPayload, isNight, options) {
     var runtimeOptions = options || {};
@@ -2900,6 +3263,10 @@ function triggerCatResponse(cat, chatPayload, isNight, options) {
             messages.push({ role:'assistant', name:cat.name, content:reply });
             if (gameMode === 'pipeline') {
                 triggerPipelineMentionResponses(cat, reply, runtimeOptions.pipelineMentionDepth);
+                pipelineMaybeAutoReact(cat, reply);
+            }
+            if (gameMode === 'discuss' && autoChat.enabled) {
+                autoChatMaybeReact(cat, reply);
             }
         } else {
             addCatMessage(cat, '喵...（猫猫好像没想好说什么）', isNight || false);
