@@ -16,6 +16,7 @@ from app.websocket.handler import ws_manager
 
 from app.api.mcp_routes import router as mcp_router
 from app.api.autonomous_chat_routes import router as autonomous_chat_router
+from app.api.autonomous_chat_ws import autonomous_chat_websocket_endpoint
 
 logger = logging.getLogger(__name__)
 
@@ -142,6 +143,24 @@ def _god_view_for_phase(room) -> dict | None:
 @app.websocket("/ws/{room_id}/{player_id}")
 async def room_ws(websocket: WebSocket, room_id: str, player_id: str) -> None:
     await ws_manager.connect(room_id, player_id, websocket)
+
+
+@app.websocket("/ws/chat/{room_id}")
+async def autonomous_chat_ws(websocket: WebSocket, room_id: str) -> None:
+    """自主聊天 WebSocket 端点 - 实时接收 AI 猫对话消息"""
+    await autonomous_chat_websocket_endpoint(websocket, room_id)
+
+
+@app.websocket("/ws/chat/{room_id}")
+async def autonomous_chat_ws(websocket: WebSocket, room_id: str) -> None:
+    """自主聊天 WebSocket 端点 - 实时接收 AI 猫对话消息"""
+    await autonomous_chat_websocket_endpoint(websocket, room_id)
+
+
+@app.websocket("/ws/chat/{room_id}")
+async def autonomous_chat_ws(websocket: WebSocket, room_id: str) -> None:
+    """自主聊天 WebSocket 端点 - 实时接收 AI 猫对话消息"""
+    await autonomous_chat_websocket_endpoint(websocket, room_id)
     try:
         room = room_manager.must_get_room(room_id)
         room.engine.mark_online_status(player_id, True)

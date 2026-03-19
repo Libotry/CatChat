@@ -484,8 +484,8 @@
                 <div style="font-size:11px;color:rgba(255,255,255,0.6);margin-top:6px;">流水线结果将按阶段自动创建/修改该目录下的文件。</div>
             </div>
             <div class="pp-requirement" style="margin-top:8px;">
-                <input id="pipelineTimeoutSec" type="number" min="30" max="3600" step="10" placeholder="任务超时（秒，默认900）" style="width:100%;padding:10px;border:1px solid rgba(255,255,255,0.15);border-radius:8px;background:rgba(255,255,255,0.08);color:white;font-size:13px;outline:none;"/>
-                <div style="font-size:11px;color:rgba(255,255,255,0.6);margin-top:6px;">单次任务超时，单位秒。建议 600~1800。</div>
+                <input id="pipelineTimeoutSec" type="number" min="3600" max="18000" step="60" placeholder="任务超时（秒，默认3600）" style="width:100%;padding:10px;border:1px solid rgba(255,255,255,0.15);border-radius:8px;background:rgba(255,255,255,0.08);color:white;font-size:13px;outline:none;"/>
+                <div style="font-size:11px;color:rgba(255,255,255,0.6);margin-top:6px;">单次任务超时，单位秒。最少 1 小时，最多 5 小时。</div>
             </div>
             <div style="margin-top:8px;font-size:12px;color:rgba(255,255,255,0.85);display:flex;align-items:center;gap:8px;">
                 <input type="checkbox" id="ppUseClaudeCodeCli" style="width:14px;height:14px;accent-color:#22c55e;"/>

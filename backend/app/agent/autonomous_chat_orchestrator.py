@@ -22,6 +22,8 @@ from enum import Enum
 from pathlib import Path
 from typing import Callable, Dict, List, Optional
 
+import httpx
+
 from app.agent.mcp_callback_bridge import get_bridge, ChatMessage
 
 logger = logging.getLogger(__name__)
@@ -44,6 +46,10 @@ class ChatParticipant:
     model_type: str
     mcp_invocation_id: str
     mcp_callback_token: str
+    api_url: str = ""          # API endpoint URL
+    api_key: str = ""          # API key
+    model: str = ""            # Model name
+    system_prompt: str = ""    # System prompt for the cat
     is_active: bool = True
     message_count: int = 0
     last_message_time: Optional[datetime] = None
@@ -125,7 +131,11 @@ class AutonomousChatOrchestrator:
                 player_name=p["player_name"],
                 model_type=p.get("model_type", "unknown"),
                 mcp_invocation_id=p["mcp_invocation_id"],
-                mcp_callback_token=p["mcp_callback_token"]
+                mcp_callback_token=p["mcp_callback_token"],
+                api_url=p.get("api_url", ""),
+                api_key=p.get("api_key", ""),
+                model=p.get("model", ""),
+                system_prompt=p.get("system_prompt", "")
             )
             session.participants[participant.player_id] = participant
         
@@ -241,32 +251,45 @@ class AutonomousChatOrchestrator:
             return sorted_by_time[0]
     
     async def _trigger_turn(self, session: ChatSession, speaker: ChatParticipant) -> None:
-        """触发一轮发言"""
+        """触发一轮发言 - 直接调用 LLM API"""
         logger.info(f"Triggering turn for {speaker.player_name} in {session.room_id}")
-        
-        # 这里应该调用 AI 的 MCP Server
-        # 由于实际实现依赖于具体的 AI 平台，这里提供一个框架
-        
-        # TODO: 实现实际的 AI 调用逻辑
-        # 伪代码：
-        # ai_response = await call_ai_via_mcp(
-        #     player_id=speaker.player_id,
-        #     context=session.get_recent_messages(),
-        #     topic=session.topic
-        # )
-        # 
-        # if ai_response.has_message:
-        #     self.bridge.post_message(...)
-        #     speaker.message_count += 1
-        #     speaker.last_message_time = datetime.utcnow()
-        #     session.current_turn += 1
-        
-        # 临时实现：模拟发言
-        await self._simulate_turn(session, speaker)
+
+        try:
+            # 获取对话上下文
+            context = self._build_context(session, speaker)
+
+            # 调用 LLM
+            response = await self._call_llm(
+                speaker=speaker,
+                context=context
+            )
+
+            if response:
+                # 直接发布消息（后端驱动，无需 MCP 回调验证）
+                room = self.bridge.get_or_create_room(session.room_id)
+                success = room.post_message(
+                    sender_id=speaker.player_id,
+                    sender_name=speaker.player_name,
+                    content=response,
+                    message_type="normal"
+                )
+
+                if success:
+                    speaker.message_count += 1
+                    speaker.last_message_time = datetime.utcnow()
+                    session.current_turn += 1
+                    logger.info(f"[Turn {session.current_turn}/{session.max_turns}] {speaker.player_name}: {response[:50]}...")
+
+        except Exception as e:
+            logger.error(f"Error in _trigger_turn: {e}")
+            raise
     
     async def _simulate_turn(self, session: ChatSession, speaker: ChatParticipant) -> None:
         """模拟一轮发言（用于测试）"""
-        # 实际使用时会被真实的 AI 调用替代
+        """
+        模拟发言 - 仅在无法调用真实 LLM 时使用
+        保留此方法用于测试和降级场景
+        """
         simulated_messages = [
             "我觉得这个话题很有意思...",
             "我同意前面的观点，还想补充一点...",
@@ -274,10 +297,10 @@ class AutonomousChatOrchestrator:
             "大家说得都很好，我认为关键是...",
             "我有些不同的想法..."
         ]
-        
+
         import random
         message_content = random.choice(simulated_messages)
-        
+
         # 发布消息
         success = self.bridge.handle_post_message(
             room_id=session.room_id,
@@ -288,17 +311,99 @@ class AutonomousChatOrchestrator:
             content=f"[{speaker.player_name}] {message_content}",
             message_type="normal"
         )[0]
-        
+
         if success:
             speaker.message_count += 1
             speaker.last_message_time = datetime.utcnow()
             session.current_turn += 1
-            
+
             logger.info(
                 f"[Turn {session.current_turn}/{session.max_turns}] "
                 f"{speaker.player_name}: {message_content}"
             )
-    
+
+    def _build_context(self, session: ChatSession, speaker: ChatParticipant) -> list:
+        """构建对话上下文"""
+        # 从 bridge 获取历史消息
+        room = self.bridge.get_or_create_room(session.room_id)
+        recent_messages = room.message_history[-10:]  # 最近10条
+
+        # 构建消息列表
+        messages = []
+
+        # 添加系统提示
+        system_content = speaker.system_prompt or f"你是{speaker.player_name}，正在参与一个群聊讨论。"
+        if session.topic:
+            system_content += f"\n当前讨论话题：{session.topic}"
+        system_content += "\n请保持自然、有深度的对话风格，回应其他参与者的观点。发言简短有力，不超过100字。"
+        messages.append({"role": "system", "content": system_content})
+
+        # 添加历史消息
+        for msg in recent_messages:
+            role = "assistant" if msg.sender_id == speaker.player_id else "user"
+            content = f"{msg.sender_name}: {msg.content}"
+            messages.append({"role": role, "content": content})
+
+        return messages
+
+    async def _call_llm(self, speaker: ChatParticipant, context: list) -> Optional[str]:
+        """调用 LLM API"""
+        if not speaker.api_url or not speaker.api_key:
+            logger.error(f"Missing API config for {speaker.player_name}")
+            return None
+
+        try:
+            async with httpx.AsyncClient(timeout=60) as client:
+                # 判断 API 类型
+                if "anthropic" in speaker.api_url.lower() or "claude" in speaker.model.lower():
+                    # Anthropic API
+                    response = await client.post(
+                        speaker.api_url,
+                        headers={
+                            "x-api-key": speaker.api_key,
+                            "anthropic-version": "2023-06-01",
+                            "content-type": "application/json"
+                        },
+                        json={
+                            "model": speaker.model or "claude-3-sonnet-20240229",
+                            "max_tokens": 500,
+                            "messages": context
+                        }
+                    )
+
+                    if response.status_code == 200:
+                        data = response.json()
+                        return data.get("content", [{}])[0].get("text", "").strip()
+                    else:
+                        logger.error(f"Anthropic API error: {response.status_code} - {response.text}")
+                        return None
+                else:
+                    # OpenAI 兼容 API
+                    response = await client.post(
+                        speaker.api_url,
+                        headers={
+                            "Authorization": f"Bearer {speaker.api_key}",
+                            "Content-Type": "application/json"
+                        },
+                        json={
+                            "model": speaker.model or "gpt-3.5-turbo",
+                            "messages": context,
+                            "temperature": 0.8,
+                            "max_tokens": 500
+                        }
+                    )
+
+                    if response.status_code == 200:
+                        data = response.json()
+                        return data.get("choices", [{}])[0].get("message", {}).get("content", "").strip()
+                    else:
+                        logger.error(f"OpenAI API error: {response.status_code} - {response.text}")
+                        return None
+
+        except Exception as e:
+            logger.error(f"LLM call failed for {speaker.player_name}: {e}")
+            return None
+
     def get_session_status(self, room_id: str) -> Optional[dict]:
         """获取会话状态"""
         if room_id not in self.sessions:

@@ -1016,7 +1016,7 @@ const server = http.createServer(function(req, res) {
 
             const prompt = String(payload.prompt || '').trim();
             const timeoutMsRaw = Number(payload.timeoutMs || 240000);
-            const timeoutMs = Number.isFinite(timeoutMsRaw) ? Math.max(10000, Math.min(3600000, timeoutMsRaw)) : 240000;
+            const timeoutMs = Number.isFinite(timeoutMsRaw) ? Math.max(10000, Math.min(18000000, timeoutMsRaw)) : 3600000;
             const source = String(payload.source || '').trim();
             const phase = String(payload.phase || '').trim();
             const catName = String(payload.catName || '').trim();

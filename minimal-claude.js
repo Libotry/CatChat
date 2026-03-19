@@ -38,6 +38,22 @@ if (verboseEnabled) {
   claudeArgs.push('--output-format', 'stream-json', '--verbose');
 }
 
+// When a working directory is specified, grant Claude file and command permissions
+// so it can operate without interactive approval in non-interactive (-p) mode.
+const workDirForTools = (process.env.CATCHAT_WORKDIR || '').trim();
+if (workDirForTools) {
+  claudeArgs.push(
+    '--allowedTools',
+    'Read', 'Write', 'Edit', 'Bash(cd:*)', 'Bash(ls:*)',
+    'Bash(cat:*)', 'Bash(mkdir:*)', 'Bash(cp:*)', 'Bash(mv:*)',
+    'Bash(rm:*)', 'Bash(find:*)', 'Bash(grep:*)', 'Bash(head:*)',
+    'Bash(tail:*)', 'Bash(touch:*)', 'Bash(echo:*)',
+    'Bash(python:*)', 'Bash(node:*)', 'Bash(npm:*)',
+    'Bash(git:*)', 'Bash(tsc:*)', 'Bash(npx:*)',
+    'Glob', 'Grep'
+  );
+}
+
 // Print the effective model env for observability in the parent proxy logs.
 console.error('ANTHROPIC_MODEL=' + String(process.env.ANTHROPIC_MODEL || ''));
 
@@ -227,7 +243,7 @@ if (!prompt) {
         const payload = JSON.parse(raw || '{}');
         const reqPrompt = String(payload.prompt || '').trim();
         const timeoutMsRaw = Number(payload.timeoutMs || 240000);
-        const timeoutMs = Number.isFinite(timeoutMsRaw) ? Math.max(10000, Math.min(3600000, timeoutMsRaw)) : 240000;
+        const timeoutMs = Number.isFinite(timeoutMsRaw) ? Math.max(10000, Math.min(18000000, timeoutMsRaw)) : 3600000;
         const switchCommand = String(payload.switchCommand || '').trim();
         const workingDir = String(payload.workingDir || '').trim();
         if (!reqPrompt) {

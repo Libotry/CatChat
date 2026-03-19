@@ -101,18 +101,32 @@ class MCPBridgeRoom:
             content=content,
             message_type=message_type
         )
-        
+
         self.message_history.append(message)
         logger.info(f"[Room {self.room_id}] {sender_name}: {content[:50]}...")
-        
+
         # 通知订阅者
         for callback in self.subscribers:
             try:
                 callback(message)
             except Exception as e:
                 logger.error(f"Subscriber callback error: {e}")
-        
+
         return True
+
+    def post_message_without_auth(
+        self,
+        sender_id: str,
+        sender_name: str,
+        content: str,
+        message_type: str = "normal"
+    ) -> bool:
+        """
+        发布消息（无需认证，供后端编排器直接调用）
+
+        这是 post_message 的别名，用于明确表示无需 MCP 回调验证
+        """
+        return self.post_message(sender_id, sender_name, content, message_type)
     
     def subscribe(self, callback: Callable[[ChatMessage], None]) -> None:
         """订阅新消息事件"""

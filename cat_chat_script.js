@@ -59,7 +59,7 @@ let wfState = {
     hideNightRoleForAudience:true
 };
 let wfAutoAdvanceTimer = null;
-let plState = { active:false, phase:'idle', requirement:'', outputDir:'', timeoutMs:900000, roles:{}, results:{}, useClaudeCodeCli:false };
+let plState = { active:false, phase:'idle', requirement:'', outputDir:'', timeoutMs:3600000, roles:{}, results:{}, useClaudeCodeCli:false };
 let cliProxy = { enabled: false, url: 'http://localhost:3456', connected: false };
 let dbState = { active:false, round:0, maxRounds:2, turnIndex:0, order:[], queue:[], speaking:false };
 let monitorState = {
@@ -943,18 +943,18 @@ function pipelineInitTimeoutSec() {
     var el = document.getElementById('pipelineTimeoutSec');
     if (!el) return;
     try {
-        var saved = Number(localStorage.getItem(PIPELINE_TIMEOUT_SEC_STORAGE_KEY) || '900');
-        if (!Number.isFinite(saved) || saved < 30) saved = 900;
-        if (saved > 3600) saved = 3600;
+        var saved = Number(localStorage.getItem(PIPELINE_TIMEOUT_SEC_STORAGE_KEY) || '3600');
+        if (!Number.isFinite(saved) || saved < 3600) saved = 3600;
+        if (saved > 18000) saved = 18000;
         el.value = String(Math.round(saved));
     } catch (_) {
-        el.value = '900';
+        el.value = '3600';
     }
     if (!el.dataset.bound) {
         el.addEventListener('change', function() {
-            var sec = Number(el.value || '900');
-            if (!Number.isFinite(sec) || sec < 30) sec = 30;
-            if (sec > 3600) sec = 3600;
+            var sec = Number(el.value || '3600');
+            if (!Number.isFinite(sec) || sec < 3600) sec = 3600;
+            if (sec > 18000) sec = 18000;
             el.value = String(Math.round(sec));
             try {
                 localStorage.setItem(PIPELINE_TIMEOUT_SEC_STORAGE_KEY, String(Math.round(sec)));
@@ -2107,9 +2107,9 @@ function pipelineStart() {
     if (!req) { showToast('⚠️ 请先输入需求描述！'); return; }
     var outputDir = String((document.getElementById('pipelineOutputDir') || {}).value || '').trim();
     if (!outputDir) { showToast('⚠️ 请先填写输出代码路径！'); return; }
-    var timeoutSec = Number((document.getElementById('pipelineTimeoutSec') || {}).value || '900');
-    if (!Number.isFinite(timeoutSec) || timeoutSec < 30) timeoutSec = 900;
-    if (timeoutSec > 3600) timeoutSec = 3600;
+    var timeoutSec = Number((document.getElementById('pipelineTimeoutSec') || {}).value || '3600');
+    if (!Number.isFinite(timeoutSec) || timeoutSec < 3600) timeoutSec = 3600;
+    if (timeoutSec > 18000) timeoutSec = 18000;
     timeoutSec = Math.round(timeoutSec);
     try { localStorage.setItem(PIPELINE_OUTPUT_DIR_STORAGE_KEY, outputDir); } catch (_) {}
     try { localStorage.setItem(PIPELINE_TIMEOUT_SEC_STORAGE_KEY, String(timeoutSec)); } catch (_) {}
@@ -2394,7 +2394,7 @@ function pipelineUpdateStatus() {
     el.innerHTML = html;
 }
 function pipelineReset() {
-    plState = { active:false, phase:'idle', requirement:'', outputDir:'', timeoutMs:900000, roles:{}, results:{}, useClaudeCodeCli:false };
+    plState = { active:false, phase:'idle', requirement:'', outputDir:'', timeoutMs:3600000, roles:{}, results:{}, useClaudeCodeCli:false };
     document.getElementById('ppStartBtn').disabled = false;
     document.getElementById('ppResetBtn').disabled = true;
     document.getElementById('ppStatus').style.display = 'none';

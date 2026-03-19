@@ -23,13 +23,26 @@ logger = logging.getLogger(__name__)
 router = APIRouter(prefix="/api/chat", tags=["autonomous-chat"])
 
 
+class ParticipantConfig(BaseModel):
+    """参与者配置"""
+    player_id: str = Field(..., description="玩家 ID")
+    player_name: str = Field(..., description="玩家名称")
+    model_type: str = Field(..., description="模型类型")
+    mcp_invocation_id: str = Field(default="", description="MCP 调用 ID（可选）")
+    mcp_callback_token: str = Field(default="", description="MCP 回调 Token（可选）")
+    api_url: str = Field(default="", description="API 端点 URL")
+    api_key: str = Field(default="", description="API 密钥")
+    model: str = Field(default="", description="模型名称")
+    system_prompt: str = Field(default="", description="系统提示词")
+
+
 class CreateSessionRequest(BaseModel):
     """创建聊天会话请求"""
     room_id: str = Field(..., description="房间 ID")
     mode: str = Field(default="free_discussion", description="交流模式")
     topic: str = Field(default="", description="讨论话题")
     max_turns: int = Field(default=20, ge=1, le=100, description="最大回合数")
-    participants: List[dict] = Field(..., description="参与者列表")
+    participants: List[ParticipantConfig] = Field(..., description="参与者列表")
 
 
 class CreateSessionResponse(BaseModel):
@@ -77,11 +90,27 @@ async def create_session(request: CreateSessionRequest):
                 detail=f"Invalid mode: {request.mode}. Valid values: {[m.value for m in ChatMode]}"
             )
         
+        # 转换参与者配置为字典列表
+        participants_data = [
+            {
+                "player_id": p.player_id,
+                "player_name": p.player_name,
+                "model_type": p.model_type,
+                "mcp_invocation_id": p.mcp_invocation_id,
+                "mcp_callback_token": p.mcp_callback_token,
+                "api_url": p.api_url,
+                "api_key": p.api_key,
+                "model": p.model,
+                "system_prompt": p.system_prompt
+            }
+            for p in request.participants
+        ]
+
         # 创建会话
         session = orchestrator.create_session(
             room_id=request.room_id,
             mode=mode,
-            participants=request.participants,
+            participants=participants_data,
             topic=request.topic,
             max_turns=request.max_turns
         )
