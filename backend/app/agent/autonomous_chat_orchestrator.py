@@ -67,6 +67,8 @@ class ChatSession:
     is_active: bool = False
     created_at: datetime = field(default_factory=datetime.utcnow)
     ended_at: Optional[datetime] = None
+    is_processing: bool = False  # 状态机处理状态
+    last_processing_time: Optional[datetime] = None  # 上次处理时间
 
 
 @dataclass
@@ -81,49 +83,53 @@ class TurnResult:
 class AutonomousChatOrchestrator:
     """
     自主交流编排器
-    
+
     职责：
     1. 管理聊天会话的生命周期
     2. 协调参与者的发言顺序
     3. 监听新消息并触发响应
     4. 实现不同的交流策略
     """
-    
+
     def __init__(self):
         self.sessions: Dict[str, ChatSession] = {}
         self.bridge = get_bridge()
         self._running = False
         self._background_tasks: Dict[str, asyncio.Task] = {}
-        
+
         # 配置
         self.response_timeout = int(os.getenv("CAT_CHAT_RESPONSE_TIMEOUT", "30"))
         self.idle_timeout = int(os.getenv("CAT_CHAT_IDLE_TIMEOUT", "120"))
         self.max_concurrent_sessions = int(os.getenv("CAT_CHAT_MAX_SESSIONS", "5"))
-        
+        self.reply_cooldown = int(os.getenv("ADD_REPLY_COOLDOWN_SECONDS", "3"))  # 发言冷却时间
+        self.processing_timeout = int(os.getenv("PROCESSING_TIMEOUT_SECONDS", "60"))  # 状态机超时重置
+
         logger.info("Autonomous Chat Orchestrator initialized")
-    
+
     def create_session(
         self,
         room_id: str,
         mode: ChatMode,
         participants: List[Dict],
         topic: str = "",
-        max_turns: int = 20
+        max_turns: int = None
     ) -> ChatSession:
         """创建新的聊天会话"""
         if room_id in self.sessions:
             raise ValueError(f"Session already exists for room {room_id}")
-        
+
         if len(self.sessions) >= self.max_concurrent_sessions:
             raise RuntimeError(f"Maximum concurrent sessions ({self.max_concurrent_sessions}) reached")
-        
+
+        # 使用环境变量作为默认最大轮数
+        actual_max_turns = max_turns or int(os.getenv("MAX_AUTONOMOUS_ROUNDS", "20"))
         session = ChatSession(
             room_id=room_id,
             mode=mode,
             topic=topic,
-            max_turns=max_turns
+            max_turns=actual_max_turns
         )
-        
+
         # 添加参与者
         for p in participants:
             participant = ChatParticipant(
@@ -138,60 +144,77 @@ class AutonomousChatOrchestrator:
                 system_prompt=p.get("system_prompt", "")
             )
             session.participants[participant.player_id] = participant
-        
+
         self.sessions[room_id] = session
         logger.info(f"Created {mode.value} session in {room_id} with {len(participants)} participants")
-        
+
         return session
-    
+
     def end_session(self, room_id: str) -> None:
         """结束聊天会话"""
         if room_id not in self.sessions:
             return
-        
+
         session = self.sessions[room_id]
         session.is_active = False
         session.ended_at = datetime.utcnow()
-        
+
         # 停止后台任务
         if room_id in self._background_tasks:
             self._background_tasks[room_id].cancel()
             del self._background_tasks[room_id]
-        
+
         logger.info(f"Ended session in {room_id} after {session.current_turn} turns")
-    
+
     async def start_autonomous_chat(self, room_id: str) -> None:
         """启动自主聊天循环"""
         if room_id not in self.sessions:
             raise ValueError(f"No session found for room {room_id}")
-        
+
         session = self.sessions[room_id]
         session.is_active = True
-        
+
         # 启动后台监控任务
         task = asyncio.create_task(self._chat_loop(room_id))
         self._background_tasks[room_id] = task
-        
+
         logger.info(f"Started autonomous chat in {room_id}")
-    
+
     async def _chat_loop(self, room_id: str) -> None:
         """聊天主循环"""
         session = self.sessions[room_id]
         idle_start = datetime.utcnow()
-        
+
         try:
             while session.is_active and session.current_turn < session.max_turns:
                 # 检查空闲超时
                 if (datetime.utcnow() - idle_start).total_seconds() > self.idle_timeout:
                     logger.info(f"Session {room_id} idle timeout, ending...")
                     break
-                
+
+                # 检查并重置状态机死锁
+                if session.is_processing and session.last_processing_time:
+                    elapsed = (datetime.utcnow() - session.last_processing_time).total_seconds()
+                    if elapsed > self.processing_timeout:
+                        logger.warning(f"Session {room_id} processing timeout ({elapsed}s), resetting state...")
+                        session.is_processing = False
+                        session.last_processing_time = None
+
+                # 如果正在处理，等待
+                if session.is_processing:
+                    await asyncio.sleep(1)
+                    continue
+
                 # 根据模式选择下一个发言人
                 next_speaker = self._select_next_speaker(session)
                 if not next_speaker:
                     await asyncio.sleep(2)
                     continue
-                
+
+                # 标记开始处理
+                session.is_processing = True
+                session.last_processing_time = datetime.utcnow()
+
                 # 触发发言
                 try:
                     await self._trigger_turn(session, next_speaker)
@@ -199,36 +222,44 @@ class AutonomousChatOrchestrator:
                 except Exception as e:
                     logger.error(f"Error triggering turn: {e}")
                     await asyncio.sleep(5)
-                
-                await asyncio.sleep(1)  # 避免过快
-            
+                finally:
+                    # 无论成功失败，都重置处理状态
+                    session.is_processing = False
+                    session.last_processing_time = None
+
+                await asyncio.sleep(self.reply_cooldown)  # 使用冷却时间避免发言过快
+
             # 正常结束
             if session.current_turn >= session.max_turns:
                 logger.info(f"Session {room_id} reached max turns ({session.max_turns})")
-            
+
             self.end_session(room_id)
-            
+
         except asyncio.CancelledError:
             logger.info(f"Session {room_id} cancelled")
             self.end_session(room_id)
         except Exception as e:
             logger.exception(f"Chat loop error: {e}")
             self.end_session(room_id)
-    
+
     def _select_next_speaker(self, session: ChatSession) -> Optional[ChatParticipant]:
         """选择下一个发言人（基于模式的策略）"""
+        now = datetime.utcnow()
         active_participants = [
             p for p in session.participants.values()
-            if p.is_active
+            if p.is_active and (
+                p.last_message_time is None or
+                (now - p.last_message_time).total_seconds() >= self.reply_cooldown
+            )
         ]
-        
+
         if not active_participants:
             return None
-        
+
         if session.mode == ChatMode.FREE_DISCUSSION:
             # 自由讨论：最少发言的人优先
             return min(active_participants, key=lambda p: p.message_count)
-        
+
         elif session.mode == ChatMode.DEBATE:
             # 辩论：轮流发言
             sorted_by_time = sorted(
@@ -236,12 +267,12 @@ class AutonomousChatOrchestrator:
                 key=lambda p: p.last_message_time or datetime.min
             )
             return sorted_by_time[0]
-        
+
         elif session.mode == ChatMode.COLLABORATION:
             # 协作：根据话题相关性选择（简化版：随机）
             import random
             return random.choice(active_participants)
-        
+
         else:
             # 默认：轮询
             sorted_by_time = sorted(
@@ -249,7 +280,7 @@ class AutonomousChatOrchestrator:
                 key=lambda p: p.last_message_time or datetime.min
             )
             return sorted_by_time[0]
-    
+
     async def _trigger_turn(self, session: ChatSession, speaker: ChatParticipant) -> None:
         """触发一轮发言 - 直接调用 LLM API"""
         logger.info(f"Triggering turn for {speaker.player_name} in {session.room_id}")
@@ -283,7 +314,7 @@ class AutonomousChatOrchestrator:
         except Exception as e:
             logger.error(f"Error in _trigger_turn: {e}")
             raise
-    
+
     async def _simulate_turn(self, session: ChatSession, speaker: ChatParticipant) -> None:
         """模拟一轮发言（用于测试）"""
         """
@@ -408,13 +439,14 @@ class AutonomousChatOrchestrator:
         """获取会话状态"""
         if room_id not in self.sessions:
             return None
-        
+
         session = self.sessions[room_id]
         return {
             "room_id": session.room_id,
             "mode": session.mode.value,
             "topic": session.topic,
             "is_active": session.is_active,
+            "is_processing": session.is_processing,
             "current_turn": session.current_turn,
             "max_turns": session.max_turns,
             "participants": [
