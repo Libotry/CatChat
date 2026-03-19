@@ -102,6 +102,9 @@ if (!prompt) {
     return s;
   }
 
+  const INACTIVITY_TIMEOUT_MS = 3 * 60 * 1000; // 3 minutes without output = stuck
+  const MAX_INACTIVITY_RETRIES = 3;
+
   function spawnClaudeForPrompt(reqPrompt, timeoutMs, switchCommand, workingDir) {
     return new Promise((resolve, reject) => {
       const scriptPath = __filename;
@@ -138,7 +141,8 @@ if (!prompt) {
           stdio: ['ignore', 'pipe', 'pipe'],
           env: Object.assign({}, process.env, {
             CATCHAT_PROMPT_B64: Buffer.from(String(reqPrompt || ''), 'utf-8').toString('base64'),
-            CATCHAT_WORKDIR: effectiveWorkDir
+            CATCHAT_WORKDIR: effectiveWorkDir,
+            CATCHAT_CLI_VERBOSE: '1'
           }),
         });
       } else {
@@ -147,42 +151,151 @@ if (!prompt) {
           cwd: effectiveWorkDir,
           stdio: ['ignore', 'pipe', 'pipe'],
           env: Object.assign({}, process.env, {
-            CATCHAT_WORKDIR: effectiveWorkDir
+            CATCHAT_WORKDIR: effectiveWorkDir,
+            CATCHAT_CLI_VERBOSE: '1'
           }),
         });
       }
 
-      let stdout = '';
+      let stdoutBuf = '';
       let stderr = '';
       let settled = false;
+      let stderrBuf = '';
+      // Collect stream-json lines for final text extraction
+      const streamLines = [];
+      // Fallback plain-text accumulator (non-JSON output)
+      let plainTextLines = [];
+      let hasJsonLines = false;
 
-      const timer = setTimeout(() => {
+      const timer = timeoutMs > 0 ? setTimeout(() => {
         if (!settled) {
           settled = true;
+          clearInterval(inactivityCheck);
           try { child.kill(); } catch (_) {}
           reject(new Error('Claude CLI 调用超时（' + timeoutMs + 'ms）'));
         }
-      }, timeoutMs);
+      }, timeoutMs) : null;
 
-      child.stdout.on('data', (chunk) => { stdout += chunk; });
-      child.stderr.on('data', (chunk) => { stderr += chunk; });
+      // Inactivity detection: if no stdout/stderr output for 3 minutes, treat as stuck
+      let lastActivityTs = Date.now();
+      const inactivityCheck = setInterval(() => {
+        if (settled) { clearInterval(inactivityCheck); return; }
+        if (Date.now() - lastActivityTs >= INACTIVITY_TIMEOUT_MS) {
+          settled = true;
+          clearInterval(inactivityCheck);
+          clearTimeout(timer);
+          console.error(`[#${reqId}] ⏰ LLM 已 ${Math.round(INACTIVITY_TIMEOUT_MS / 60000)} 分钟无输出，判定为卡住`);
+          try { child.kill(); } catch (_) {}
+          const err = new Error('LLM 无活动超时（' + Math.round(INACTIVITY_TIMEOUT_MS / 60000) + ' 分钟无输出）');
+          err.code = 'INACTIVITY_TIMEOUT';
+          reject(err);
+        }
+      }, 15000); // check every 15 seconds
+
+      // Real-time progress logging: parse stream-json events and emit backend logs only
+      child.stdout.on('data', (chunk) => {
+        lastActivityTs = Date.now();
+        stdoutBuf += chunk.toString();
+        let idx;
+        while ((idx = stdoutBuf.indexOf('\n')) !== -1) {
+          const line = stdoutBuf.slice(0, idx).replace(/\r$/, '');
+          stdoutBuf = stdoutBuf.slice(idx + 1);
+          const trimmed = line.trim();
+          if (!trimmed) continue;
+          let ev;
+          try {
+            ev = JSON.parse(trimmed);
+          } catch (_) {
+            // plain-text line (non-JSON output from Claude CLI)
+            if (!trimmed.startsWith('Claude process') && !trimmed.startsWith('[No assistant')) {
+              console.error(`[#${reqId}] 📝 ${trimmed.slice(0, 120)}`);
+              plainTextLines.push(trimmed);
+            }
+            continue;
+          }
+          hasJsonLines = true;
+          streamLines.push(ev);
+          // Backend-only progress logs
+          const type = ev.type || '';
+          if (type === 'assistant' && ev.message) {
+            const content = ev.message.content;
+            if (Array.isArray(content)) {
+              for (const block of content) {
+                if (block.type === 'text' && block.text) {
+                  const preview = block.text.slice(0, 120).replace(/\n/g, ' ');
+                  console.error(`[#${reqId}] 💬 LLM: ${preview}${block.text.length > 120 ? '…' : ''}`);
+                } else if (block.type === 'tool_use') {
+                  console.error(`[#${reqId}] 🔧 工具调用: ${block.name}`);
+                } else if (block.type === 'thinking' && block.thinking) {
+                  const preview = block.thinking.slice(0, 80).replace(/\n/g, ' ');
+                  console.error(`[#${reqId}] 🧠 思考: ${preview}${block.thinking.length > 80 ? '…' : ''}`);
+                }
+              }
+            }
+          } else if (type === 'tool_result') {
+            console.error(`[#${reqId}] ✔ 工具返回`);
+          } else if (type === 'result') {
+            const subtype = ev.subtype || '';
+            if (subtype === 'success') {
+              console.error(`[#${reqId}] ✅ LLM 任务完成`);
+            } else if (subtype === 'error') {
+              console.error(`[#${reqId}] ❌ LLM 报错: ${String(ev.error || '').slice(0, 120)}`);
+            }
+          }
+        }
+      });
+      child.stderr.on('data', (chunk) => {
+        lastActivityTs = Date.now();
+        const text = chunk.toString();
+        stderr += text;
+        stderrBuf += text;
+        let idx;
+        while ((idx = stderrBuf.indexOf('\n')) !== -1) {
+          const line = stderrBuf.slice(0, idx).replace(/\r$/, '');
+          stderrBuf = stderrBuf.slice(idx + 1);
+          if (line.trim()) {
+            console.error(`[#${reqId}] ⚙ ${line}`);
+          }
+        }
+      });
       child.on('error', (err) => {
-        if (!settled) { settled = true; clearTimeout(timer); reject(err); }
+        if (!settled) { settled = true; clearTimeout(timer); clearInterval(inactivityCheck); reject(err); }
       });
       child.on('close', (code) => {
         if (settled) return;
         settled = true;
         clearTimeout(timer);
-        // Filter out status lines from stdout
-        const lines = stdout.split(/\r?\n/).filter((l) => {
-          const t = l.trim();
-          if (!t) return false;
-          if (t.startsWith('[No assistant text found in stream output]')) return false;
-          if (t.startsWith('Claude process exited with code:')) return false;
-          if (t.startsWith('Claude process ended by signal:')) return false;
-          return true;
-        });
-        const replyText = lines.join('\n').trim();
+        clearInterval(inactivityCheck);
+
+        let replyText = '';
+        if (hasJsonLines) {
+          // Extract only the final assistant text from stream-json events.
+          // Priority: result event with result_text, then last assistant message text blocks.
+          let resultText = '';
+          let lastAssistantText = '';
+          for (const ev of streamLines) {
+            const type = ev.type || '';
+            if (type === 'result' && ev.subtype === 'success') {
+              // result event carries the final output
+              const rt = String(ev.result || '').trim();
+              if (rt) resultText = rt;
+            } else if (type === 'assistant' && ev.message) {
+              const content = ev.message.content;
+              if (Array.isArray(content)) {
+                const texts = content
+                  .filter((b) => b.type === 'text' && b.text)
+                  .map((b) => b.text)
+                  .join('\n');
+                if (texts) lastAssistantText = texts;
+              }
+            }
+          }
+          replyText = (resultText || lastAssistantText).trim();
+        } else {
+          // Plain-text output mode (no stream-json)
+          replyText = plainTextLines.join('\n').trim();
+        }
+
         if (code === 0 && replyText) {
           resolve({ reply: replyText, stderr: stderr.trim() });
         } else {
@@ -242,8 +355,8 @@ if (!prompt) {
         const raw = await readBody(req);
         const payload = JSON.parse(raw || '{}');
         const reqPrompt = String(payload.prompt || '').trim();
-        const timeoutMsRaw = Number(payload.timeoutMs || 240000);
-        const timeoutMs = Number.isFinite(timeoutMsRaw) ? Math.max(10000, Math.min(18000000, timeoutMsRaw)) : 3600000;
+        const timeoutMsRaw = Number(payload.timeoutMs || 0);
+        const timeoutMs = (timeoutMsRaw > 0 && Number.isFinite(timeoutMsRaw)) ? timeoutMsRaw : 0;
         const switchCommand = String(payload.switchCommand || '').trim();
         const workingDir = String(payload.workingDir || '').trim();
         if (!reqPrompt) {
@@ -258,7 +371,24 @@ if (!prompt) {
         if (workingDir) {
           console.error(`[#${reqId}] 📁 工作目录: ${workingDir}`);
         }
-        const result = await spawnClaudeForPrompt(reqPrompt, timeoutMs, switchCommand, workingDir);
+
+        // Auto-retry on inactivity timeout: send "继续" to unstick the LLM
+        let currentPrompt = reqPrompt;
+        let result = null;
+        for (let attempt = 0; attempt <= MAX_INACTIVITY_RETRIES; attempt++) {
+          try {
+            result = await spawnClaudeForPrompt(currentPrompt, timeoutMs, switchCommand, workingDir);
+            break; // success
+          } catch (retryErr) {
+            if (retryErr.code === 'INACTIVITY_TIMEOUT' && attempt < MAX_INACTIVITY_RETRIES) {
+              console.error(`[#${reqId}] 🔄 第 ${attempt + 1} 次无活动超时，发送"继续"重试...`);
+              currentPrompt = reqPrompt + '\n\n（系统提示：你之前的回复似乎中断了，请继续完成任务。）';
+              continue;
+            }
+            throw retryErr; // not inactivity or retries exhausted
+          }
+        }
+
         console.error(`[#${reqId}] ✅ 完成`);
         res.writeHead(200, { 'Content-Type': 'application/json' });
         res.end(JSON.stringify({ ok: true, reply: result.reply, stderr: result.stderr || '' }));
@@ -496,6 +626,13 @@ rl.on('line', (line) => {
   try {
     event = JSON.parse(trimmed);
   } catch (err) {
+    // When verbose/stream-json mode is active, non-JSON lines are process logs
+    // from Claude CLI (e.g. progress indicators, tool status). Send them to
+    // stderr so they don't leak into the final reply text.
+    if (verboseEnabled) {
+      process.stderr.write('[verbose] ' + trimmed + '\n');
+      return;
+    }
     // Some Claude CLI versions return plain text instead of stream-json lines.
     // Fall back gracefully instead of treating this as an error.
     if (!plainTextMode && hasAssistantText) {

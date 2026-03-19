@@ -41,6 +41,7 @@ const WEREWOLF_BACKEND_AUTO_ADVANCE_DELAY_MS = 1200;
 
 // ====================== State ======================
 let cats = [], messages = [];
+let replyingTo = null; // { messageId, content, senderName } 当前正在回复的消息
 let selectedEmoji = '🐱', selectedColor = '#f582ae', selectedProvider = 'openai';
 let selectedCustomCompat = 'openai';
 let selectedAvatarUrl = '';
@@ -59,7 +60,7 @@ let wfState = {
     hideNightRoleForAudience:true
 };
 let wfAutoAdvanceTimer = null;
-let plState = { active:false, phase:'idle', requirement:'', outputDir:'', timeoutMs:3600000, roles:{}, results:{}, useClaudeCodeCli:false };
+let plState = { active:false, phase:'idle', requirement:'', outputDir:'', timeoutMs:0, roles:{}, results:{}, useClaudeCodeCli:false };
 let cliProxy = { enabled: false, url: 'http://localhost:3456', connected: false };
 let dbState = { active:false, round:0, maxRounds:2, turnIndex:0, order:[], queue:[], speaking:false };
 let monitorState = {
@@ -70,6 +71,8 @@ let monitorState = {
     viewMode: 'god',
     ws: null,
     isConnected: false,
+    chatWs: null,
+    chatWsRoomId: '',
     phaseLog: [],
     speechTimeline: [],
     speechSeenKeys: {},
@@ -942,26 +945,7 @@ function pipelineInitOutputDir() {
 function pipelineInitTimeoutSec() {
     var el = document.getElementById('pipelineTimeoutSec');
     if (!el) return;
-    try {
-        var saved = Number(localStorage.getItem(PIPELINE_TIMEOUT_SEC_STORAGE_KEY) || '3600');
-        if (!Number.isFinite(saved) || saved < 3600) saved = 3600;
-        if (saved > 18000) saved = 18000;
-        el.value = String(Math.round(saved));
-    } catch (_) {
-        el.value = '3600';
-    }
-    if (!el.dataset.bound) {
-        el.addEventListener('change', function() {
-            var sec = Number(el.value || '3600');
-            if (!Number.isFinite(sec) || sec < 3600) sec = 3600;
-            if (sec > 18000) sec = 18000;
-            el.value = String(Math.round(sec));
-            try {
-                localStorage.setItem(PIPELINE_TIMEOUT_SEC_STORAGE_KEY, String(Math.round(sec)));
-            } catch (_) {}
-        });
-        el.dataset.bound = '1';
-    }
+    el.value = '0';
 }
 
 function normalizeImportedCats(rawCats, startIndex) {
@@ -1823,8 +1807,8 @@ function debateTriggerCatResponse(cat, chatPayload) {
     var done = function(reply) {
         removeThinkingIndicator(cat.id);
         if (reply) {
-            addCatMessage(cat, reply, false);
-            messages.push({ role:'assistant', name:cat.name, content:reply });
+            var el = addCatMessage(cat, reply, false);
+            messages.push({ role:'assistant', name:cat.name, content:reply, id: el ? el.dataset.messageId : undefined });
         } else {
             addCatMessage(cat, '喵...（猫猫好像没想好说什么）', false);
         }
@@ -2107,10 +2091,7 @@ function pipelineStart() {
     if (!req) { showToast('⚠️ 请先输入需求描述！'); return; }
     var outputDir = String((document.getElementById('pipelineOutputDir') || {}).value || '').trim();
     if (!outputDir) { showToast('⚠️ 请先填写输出代码路径！'); return; }
-    var timeoutSec = Number((document.getElementById('pipelineTimeoutSec') || {}).value || '3600');
-    if (!Number.isFinite(timeoutSec) || timeoutSec < 3600) timeoutSec = 3600;
-    if (timeoutSec > 18000) timeoutSec = 18000;
-    timeoutSec = Math.round(timeoutSec);
+    var timeoutSec = 0;
     try { localStorage.setItem(PIPELINE_OUTPUT_DIR_STORAGE_KEY, outputDir); } catch (_) {}
     try { localStorage.setItem(PIPELINE_TIMEOUT_SEC_STORAGE_KEY, String(timeoutSec)); } catch (_) {}
     var roles = pipelineBuildRolesFromCats();
@@ -2131,7 +2112,7 @@ function pipelineStart() {
             phase: 'dev',
             requirement: req,
             outputDir: outputDir,
-            timeoutMs: timeoutSec * 1000,
+            timeoutMs: 0,
             useClaudeCodeCli: true,
             roles: roles,
             results: {}
@@ -2142,7 +2123,6 @@ function pipelineStart() {
         addSystemMessage('🚀 流水线已启动！需求已下发。', 'pipeline-msg');
         addSystemMessage('📋 需求描述：' + req, 'pipeline-msg');
         addSystemMessage('📁 输出目录：' + outputDir, 'pipeline-msg');
-        addSystemMessage('⏱️ 单任务超时：' + timeoutSec + ' 秒', 'pipeline-msg');
         addSystemMessage('🔀 模型切换：' + roleSwitchSummary, 'pipeline-msg');
         addSystemMessage('🧩 专属 CLI 端口：' + portSummary, 'pipeline-msg');
         addSystemMessage('🤖 Claude Code CLI 手动多窗口模式：请确保每只猫已手动运行 node cat_chat_cli.js --port <端口>。', 'pipeline-msg');
@@ -2242,7 +2222,7 @@ function callPipelineClaudeCodeCLI(cat, chatPayload, phase) {
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({
             prompt: prompt,
-            timeoutMs: Number(plState.timeoutMs || 900000),
+            timeoutMs: 0,
             source: 'pipeline',
             phase: String(phase || ''),
             catName: String((cat && cat.name) || ''),
@@ -2310,8 +2290,8 @@ function triggerPipelineCatResponse(cat, chatPayload, phase) {
                 addSystemMessage(lines.join('\n'), 'pipeline-msg');
                 messages.push({ role:'assistant', name:cat.name, content:lines.join('\n') });
             } else {
-                addCatMessage(cat, reply, false);
-                messages.push({ role:'assistant', name:cat.name, content:reply });
+                var el = addCatMessage(cat, reply, false);
+                messages.push({ role:'assistant', name:cat.name, content:reply, id: el ? el.dataset.messageId : undefined });
             }
             plState.results[phase] = reply;
             pipelineAdvance(phase);
@@ -2394,7 +2374,7 @@ function pipelineUpdateStatus() {
     el.innerHTML = html;
 }
 function pipelineReset() {
-    plState = { active:false, phase:'idle', requirement:'', outputDir:'', timeoutMs:3600000, roles:{}, results:{}, useClaudeCodeCli:false };
+    plState = { active:false, phase:'idle', requirement:'', outputDir:'', timeoutMs:0, roles:{}, results:{}, useClaudeCodeCli:false };
     document.getElementById('ppStartBtn').disabled = false;
     document.getElementById('ppResetBtn').disabled = true;
     document.getElementById('ppStatus').style.display = 'none';
@@ -2618,6 +2598,10 @@ function renderMembers() {
                 '<option value="use-glm"' + (selected === 'use-glm' ? ' selected' : '') + '>use-glm</option>' +
                 '<option value="use-opus46"' + (selected === 'use-opus46' ? ' selected' : '') + '>use-opus46</option>' +
                 '<option value="use-kimi"' + (selected === 'use-kimi' ? ' selected' : '') + '>use-kimi</option>' +
+                '<option value="use-gpt54"' + (selected === 'use-gpt54' ? ' selected' : '') + '>use-gpt54</option>' +
+                '<option value="use-sonnet46"' + (selected === 'use-sonnet46' ? ' selected' : '') + '>use-sonnet46</option>' +
+                '<option value="use-gemini31"' + (selected === 'use-gemini31' ? ' selected' : '') + '>use-gemini31</option>' +
+                '<option value="use-gpt53codex"' + (selected === 'use-gpt53codex' ? ' selected' : '') + '>use-gpt53codex</option>' +
                 '</select>' +
                 '</div>';
             pipelineSwitchEditor += '<div style="margin-top:4px;display:flex;align-items:center;gap:6px;">' +
@@ -2634,8 +2618,8 @@ function setCatPipelineSwitchCommand(catId, cmd) {
     var cat = cats.find(function(c) { return c.id === catId; });
     if (!cat) return;
     var next = String(cmd || '').trim();
-    if (next !== '' && next !== 'use-glm' && next !== 'use-opus46' && next !== 'use-kimi') {
-        showToast('⚠️ 仅支持 use-glm / use-opus46 / use-kimi');
+    if (next !== '' && next !== 'use-glm' && next !== 'use-opus46' && next !== 'use-kimi' && next !== 'use-gpt54' && next !== 'use-sonnet46' && next !== 'use-gemini31' && next !== 'use-gpt53codex') {
+        showToast('⚠️ 仅支持 use-glm / use-opus46 / use-kimi / use-gpt54 / use-sonnet46 / use-gemini31 / use-gpt53codex');
         return;
     }
     cat.pipelineSwitchCommand = next;
@@ -2717,19 +2701,137 @@ function addSystemMessage(text, cls, options) {
         ttsSpeak(speaker.key, speaker.name || '法官', text);
     }
 }
-function addUserMessage(text) {
+function addUserMessage(text, label, replyTo) {
     hideEmptyState();
-    var label = gameMode === 'werewolf' ? '铲屎官 (法官)' : '铲屎官';
+    label = label || (gameMode === 'werewolf' ? '铲屎官 (法官)' : '铲屎官');
     var d = document.createElement('div');
     d.className = 'message user-message';
-    d.innerHTML = '<div class="message-avatar" style="background:linear-gradient(135deg,#ffd803,#ff8c42);">🧑</div><div class="message-content"><div class="message-sender">' + label + '</div><div class="message-bubble">' + escapeHtml(text) + '</div><div class="message-time">' + getTimeStr() + '</div></div>';
+    d.dataset.messageId = 'msg_' + Date.now() + '_' + Math.random().toString(36).substr(2, 9);
+
+    var replyHtml = '';
+    if (replyTo) {
+        var sender = replyTo.senderName || '未知';
+        var content = (replyTo.content || '').substring(0, 50) + ((replyTo.content || '').length > 50 ? '...' : '');
+        replyHtml = '<div class="message-reply-ref" onclick="scrollToMessage(\'' + (replyTo.messageId || '') + '\');event.stopPropagation();">' +
+            '<span class="reply-icon">↩</span>' +
+            '<span class="reply-sender">' + sender + '</span>' +
+            '<span class="reply-text">' + content + '</span>' +
+            '</div>';
+    }
+
+    d.innerHTML = '<div class="message-avatar" style="background:linear-gradient(135deg,#ffd803,#ff8c42);">🧑</div><div class="message-content"><div class="message-sender">' + label + '</div>' + replyHtml + '<div class="message-bubble">' + escapeHtml(text) + '</div><div class="message-time">' + getTimeStr() + '</div></div>';
+
+    // 右键气泡弹出菜单
+    var bubble = d.querySelector('.message-bubble');
+    if (bubble) {
+        bubble.addEventListener('contextmenu', function(e) {
+            if (e.target.closest('.message-reply-ref')) return;
+            e.preventDefault();
+            showBubbleContextMenu(e, { id: d.dataset.messageId, content: text, senderName: label });
+        });
+    }
+
     document.getElementById('chatMessages').appendChild(d);
     scrollToBottom();
+    return d;
 }
-function addCatMessage(cat, text, isNight) {
+
+// 设置回复目标
+function setReplyTarget(msg) {
+    if (!msg || !msg.id) return;
+    replyingTo = {
+        messageId: msg.id,
+        content: msg.content,
+        senderName: msg.senderName || '未知'
+    };
+    var indicator = document.getElementById('replyIndicator');
+    var nameEl = document.getElementById('replyToName');
+    var contentEl = document.getElementById('replyContent');
+    if (indicator && nameEl && contentEl) {
+        nameEl.textContent = replyingTo.senderName;
+        contentEl.textContent = replyingTo.content.substring(0, 50) + (replyingTo.content.length > 50 ? '...' : '');
+        indicator.classList.add('active');
+    }
+    var input = document.getElementById('messageInput');
+    if (input) input.focus();
+}
+
+// 取消回复
+function cancelReply() {
+    replyingTo = null;
+    var indicator = document.getElementById('replyIndicator');
+    if (indicator) indicator.classList.remove('active');
+}
+
+// 右键气泡上下文菜单
+(function() {
+    var menuEl = null;
+    function removeMenu() {
+        if (menuEl) { menuEl.remove(); menuEl = null; }
+    }
+    document.addEventListener('click', removeMenu);
+    document.addEventListener('contextmenu', function(e) {
+        if (!e.target.closest('.bubble-context-menu')) removeMenu();
+    });
+    window.showBubbleContextMenu = function(e, msgInfo) {
+        removeMenu();
+        var menu = document.createElement('div');
+        menu.className = 'bubble-context-menu';
+
+        var btnQuote = document.createElement('button');
+        btnQuote.innerHTML = '📎 引用';
+        btnQuote.onclick = function() {
+            setReplyTarget({ id: msgInfo.id, content: msgInfo.content, senderName: msgInfo.senderName });
+            removeMenu();
+        };
+
+        var btnCopy = document.createElement('button');
+        btnCopy.innerHTML = '📋 复制';
+        btnCopy.onclick = function() {
+            navigator.clipboard.writeText(msgInfo.content).catch(function() {
+                var ta = document.createElement('textarea');
+                ta.value = msgInfo.content;
+                document.body.appendChild(ta);
+                ta.select();
+                document.execCommand('copy');
+                ta.remove();
+            });
+            removeMenu();
+        };
+
+        menu.appendChild(btnQuote);
+        menu.appendChild(btnCopy);
+        document.body.appendChild(menu);
+        menuEl = menu;
+
+        // 定位：防止超出视口
+        var x = e.clientX, y = e.clientY;
+        var mw = menu.offsetWidth || 140, mh = menu.offsetHeight || 80;
+        if (x + mw > window.innerWidth) x = window.innerWidth - mw - 8;
+        if (y + mh > window.innerHeight) y = window.innerHeight - mh - 8;
+        menu.style.left = x + 'px';
+        menu.style.top = y + 'px';
+    };
+})();
+
+// 滚动到指定消息
+function scrollToMessage(messageId) {
+    if (!messageId) return;
+    var msgEl = document.querySelector('[data-message-id="' + messageId + '"]');
+    if (msgEl) {
+        msgEl.scrollIntoView({ behavior: 'smooth', block: 'center' });
+        msgEl.style.animation = 'highlightMsg 1s ease';
+        setTimeout(function() {
+            msgEl.style.animation = '';
+        }, 1000);
+    }
+}
+function addCatMessage(cat, text, isNight, replyTo) {
     var d = document.createElement('div');
     d.className = 'message cat-message wf-msg';
     d.dataset.wfNight = isNight ? 'true' : 'false';
+    d.dataset.messageId = 'msg_' + Date.now() + '_' + Math.random().toString(36).substr(2, 9);
+    d.dataset.catId = cat.id;
     if (isNight) d.classList.add('message-night');
     if (gameMode === 'werewolf' && isNight) {
         d.dataset.wfHidden = 'true';
@@ -2751,7 +2853,31 @@ function addCatMessage(cat, text, isNight) {
         var senderRoleClass = (senderRole.id || '').replace(/[^a-z0-9_-]/ig, '');
         senderRoleHtml = ' <span class="role-badge sender-role-badge ' + senderRoleClass + '">' + escapeHtml(senderRoleIcon) + ' ' + escapeHtml(senderRole.name) + '</span>';
     }
-    d.innerHTML = '<div class="message-avatar" style="background:linear-gradient(135deg,' + cat.color + ',' + adjustColor(cat.color, -20) + ');" onmouseenter="showCatTooltip(\'' + cat.id + '\',event)" onmouseleave="hideCatTooltip()">' + catAvatarHtml(cat) + '</div><div class="message-content"><div class="message-sender">' + escapeHtml(cat.name) + nightLabel + senderRoleHtml + '</div><div class="message-bubble" data-real="' + escapeHtml(text) + '">' + displayText + '</div><div class="message-time">' + getTimeStr() + '</div></div>';
+
+    // 引用回复 HTML
+    var replyHtml = '';
+    if (replyTo) {
+        var sender = replyTo.senderName || '未知';
+        var content = (replyTo.content || '').substring(0, 50) + ((replyTo.content || '').length > 50 ? '...' : '');
+        replyHtml = '<div class="message-reply-ref" onclick="scrollToMessage(\'' + (replyTo.messageId || '') + '\');event.stopPropagation();">' +
+            '<span class="reply-icon">↩</span>' +
+            '<span class="reply-sender">' + escapeHtml(sender) + '</span>' +
+            '<span class="reply-text">' + escapeHtml(content) + '</span>' +
+            '</div>';
+    }
+
+    d.innerHTML = '<div class="message-avatar" style="background:linear-gradient(135deg,' + cat.color + ',' + adjustColor(cat.color, -20) + ');" onmouseenter="showCatTooltip(\'' + cat.id + '\',event)" onmouseleave="hideCatTooltip()">' + catAvatarHtml(cat) + '</div><div class="message-content"><div class="message-sender">' + escapeHtml(cat.name) + nightLabel + senderRoleHtml + '</div>' + replyHtml + '<div class="message-bubble" data-real="' + escapeHtml(text) + '">' + displayText + '</div><div class="message-time">' + getTimeStr() + '</div></div>';
+
+    // 右键气泡弹出菜单
+    var bubble = d.querySelector('.message-bubble');
+    if (bubble) {
+        bubble.addEventListener('contextmenu', function(e) {
+            if (e.target.closest('.message-reply-ref')) return;
+            e.preventDefault();
+            showBubbleContextMenu(e, { id: d.dataset.messageId, content: text, senderName: cat.name });
+        });
+    }
+
     document.getElementById('chatMessages').appendChild(d);
     if (werewolfShouldHideNightRoleBadge(isNight)) {
         d.classList.add('role-hidden');
@@ -2760,6 +2886,7 @@ function addCatMessage(cat, text, isNight) {
     if (!d.classList.contains('message-hidden')) {
         ttsSpeak(cat.id, cat.name, text);
     }
+    return d;
 }
 function addThinkingIndicator(cat) {
     var d = document.createElement('div');
@@ -2910,8 +3037,8 @@ function autoChatTriggerIdle() {
         autoChat.reacting = false;
         var reply = (result && typeof result === 'object') ? String(result.reply || '').trim() : String(result || '').trim();
         if (reply) {
-            addCatMessage(cat, reply, false);
-            messages.push({ role: 'assistant', name: cat.name, content: reply });
+            var el = addCatMessage(cat, reply, false);
+            messages.push({ role: 'assistant', name: cat.name, content: reply, id: el ? el.dataset.messageId : undefined });
             autoChat.consecutiveAuto++;
             autoChat.lastActivityTime = Date.now();
             autoChatMaybeReact(cat, reply);
@@ -2958,8 +3085,8 @@ function autoChatMaybeReact(sourceCat, sourceReply) {
             autoChat.reacting = false;
             var reply = (result && typeof result === 'object') ? String(result.reply || '').trim() : String(result || '').trim();
             if (reply) {
-                addCatMessage(reactCat, reply, false);
-                messages.push({ role: 'assistant', name: reactCat.name, content: reply });
+                var el = addCatMessage(reactCat, reply, false);
+                messages.push({ role: 'assistant', name: reactCat.name, content: reply, id: el ? el.dataset.messageId : undefined });
                 autoChat.consecutiveAuto++;
                 autoChat.lastActivityTime = Date.now();
                 autoChatMaybeReact(reactCat, reply);
@@ -2992,8 +3119,27 @@ function sendMessage() {
     }
     input.value = '';
     autoResize(input);
-    addUserMessage(text);
-    messages.push({ role:'user', name:'铲屎官', content:text });
+    // 处理回复
+    var replyInfo = null;
+    if (replyingTo) {
+        replyInfo = {
+            messageId: replyingTo.messageId,
+            content: replyingTo.content,
+            senderName: replyingTo.senderName
+        };
+    }
+
+    var msgEl = addUserMessage(text, null, replyInfo);
+    var msgObj = { role:'user', name:'铲屎官', content:text, id: msgEl.dataset.messageId };
+    if (replyingTo) {
+        msgObj.replyTo = replyingTo.messageId;
+        msgObj.replyToContent = replyingTo.content;
+        msgObj.replyToSender = replyingTo.senderName;
+    }
+    messages.push(msgObj);
+
+    // 清除回复状态
+    cancelReply();
     if (cats.length === 0) {
         addSystemMessage('💡 还没有猫猫加入呢～点击左侧「添加一只猫猫」按钮吧！');
         return;
@@ -3069,7 +3215,12 @@ function parseMentions(text) {
 function buildApiMessages(cat, msgHistory, isIntro) {
     var systemContent = cat.personality + '\n\n【聊天室规则】\n- 你在一个有多只猫猫和铲屎官的聊天室里。\n- 请用简短自然的口吻回复（30-100字左右）。\n- 可以用"喵"等语气词，但不要每句话都用。\n- 保持自己的性格特点。';
     var history = (isIntro ? msgHistory : msgHistory.slice(-20)).map(function(m) {
-        return { role: m.name === cat.name ? 'assistant' : 'user', content: '[' + m.name + ']: ' + m.content };
+        var prefix = '[' + m.name + ']: ';
+        var replyCtx = '';
+        if (m.replyToSender && m.replyToContent) {
+            replyCtx = '(引用回复 ' + m.replyToSender + ' 的消息「' + m.replyToContent.substring(0, 50) + '」) ';
+        }
+        return { role: m.name === cat.name ? 'assistant' : 'user', content: prefix + replyCtx + m.content };
     });
     return { system: systemContent, messages: history };
 }
@@ -3214,8 +3365,8 @@ function pipelineMaybeAutoReact(sourceCat, sourceReply) {
             reply = reply.replace(/^\[?不?发言\]?\s*/g, '').trim();
             if (!reply) return;
 
-            addCatMessage(reactCat, reply, false);
-            messages.push({ role: 'assistant', name: reactCat.name, content: reply });
+            var el = addCatMessage(reactCat, reply, false);
+            messages.push({ role: 'assistant', name: reactCat.name, content: reply, id: el ? el.dataset.messageId : undefined });
             pipelineAutoReact.consecutiveAuto++;
             pipelineAutoReact.lastAutoTime = Date.now();
 
@@ -3259,8 +3410,8 @@ function triggerCatResponse(cat, chatPayload, isNight, options) {
         removeThinkingIndicator(cat.id);
         var reply = (result && typeof result === 'object') ? String(result.reply || '').trim() : String(result || '').trim();
         if (reply) {
-            addCatMessage(cat, reply, isNight || false);
-            messages.push({ role:'assistant', name:cat.name, content:reply });
+            var catMsgEl = addCatMessage(cat, reply, isNight || false);
+            messages.push({ role:'assistant', name:cat.name, content:reply, id: catMsgEl ? catMsgEl.dataset.messageId : undefined });
             if (gameMode === 'pipeline') {
                 triggerPipelineMentionResponses(cat, reply, runtimeOptions.pipelineMentionDepth);
                 pipelineMaybeAutoReact(cat, reply);
@@ -4129,6 +4280,93 @@ function monitorConnectWs() {
     };
 }
 
+function autoChatConnectWs(roomId) {
+    if (!roomId) return;
+    // 关闭旧连接
+    if (monitorState.chatWs) {
+        try { monitorState.chatWs.close(); } catch (e) {}
+        monitorState.chatWs = null;
+    }
+    var base = monitorState.apiBase || 'http://127.0.0.1:8000';
+    var wsBase = base.replace(/^http:/i, 'ws:').replace(/^https:/i, 'wss:');
+    var wsUrl = wsBase + '/ws/chat/' + encodeURIComponent(roomId);
+    monitorState.chatWsRoomId = roomId;
+    var ws;
+    try {
+        ws = new WebSocket(wsUrl);
+    } catch (e) {
+        console.error('[autoChatWs] 连接失败:', e);
+        return;
+    }
+    monitorState.chatWs = ws;
+
+    ws.onopen = function() {
+        console.log('[autoChatWs] 已连接 · room=' + roomId);
+    };
+
+    ws.onmessage = function(event) {
+        try {
+            var msg = JSON.parse(event.data);
+            var evt = msg.event;
+            var payload = msg.payload || {};
+
+            if (evt === 'chat_message' || evt === 'message') {
+                // 查找对应的猫猫：先按名字匹配，再按 player_id 兜底
+                var senderName = String(payload.sender_name || '');
+                var senderId = String(payload.sender_id || '');
+                var content = String(payload.content || '').trim();
+                if (!content) return;
+
+                var cat = null;
+                if (senderName) {
+                    cat = cats.find(function(c) { return (c.name || '').trim() === senderName.trim(); });
+                }
+                if (!cat && senderId) {
+                    cat = cats.find(function(c) { return c.id === senderId; });
+                }
+                // 兜底：用 werewolfPseudoCat 构造一个伪猫
+                if (!cat) {
+                    cat = werewolfPseudoCat(senderId || senderName);
+                    cat.name = senderName || cat.name;
+                }
+
+                var el = addCatMessage(cat, content, false);
+                messages.push({ role: 'assistant', name: cat.name, content: content, id: el ? el.dataset.messageId : undefined });
+
+            } else if (evt === 'chat_history') {
+                // 历史消息批量渲染（去重）
+                var list = (payload.messages || []);
+                list.forEach(function(m) {
+                    var sName = String(m.sender_name || '');
+                    var sId = String(m.sender_id || '');
+                    var c = cats.find(function(cat) { return (cat.name || '').trim() === sName.trim(); })
+                           || cats.find(function(cat) { return cat.id === sId; })
+                           || werewolfPseudoCat(sId || sName);
+                    c.name = sName || c.name;
+                    var text = String(m.content || '').trim();
+                    if (text) {
+                        var el = addCatMessage(c, text, false);
+                        messages.push({ role: 'assistant', name: c.name, content: text, id: el ? el.dataset.messageId : undefined });
+                    }
+                });
+            }
+        } catch (e) {
+            console.error('[autoChatWs] 消息解析失败:', e);
+        }
+    };
+
+    ws.onclose = function() {
+        if (monitorState.chatWs === ws) {
+            monitorState.chatWs = null;
+        }
+        console.log('[autoChatWs] 已断开 · room=' + roomId);
+    };
+
+    ws.onerror = function(e) {
+        console.error('[autoChatWs] 连接异常 · room=' + roomId, e);
+    };
+}
+
 function monitorHandleWsEvent(msg) {
     var eventId = Number(msg && msg.event_id);
     if (Number.isFinite(eventId) && eventId > 0) {
@@ -4165,6 +4403,20 @@ function monitorHandleWsEvent(msg) {
     }
     if (evt === 'agent_status_update') {
         monitorApplyAgentStatusPayload(payload);
+        return;
+    }
+    // 自主聊天消息（兜底：若从主 WS 收到 chat_message）
+    if (evt === 'chat_message' || evt === 'message') {
+        var senderName = String(payload.sender_name || '');
+        var senderId = String(payload.sender_id || '');
+        var content = String(payload.content || '').trim();
+        if (!content) return;
+        var cat = cats.find(function(c) { return (c.name || '').trim() === senderName.trim(); })
+                 || cats.find(function(c) { return c.id === senderId; })
+                 || werewolfPseudoCat(senderId || senderName);
+        cat.name = senderName || cat.name;
+        var el = addCatMessage(cat, content, false);
+        messages.push({ role: 'assistant', name: cat.name, content: content, id: el ? el.dataset.messageId : undefined });
         return;
     }
 }
@@ -4662,14 +4914,26 @@ function importChatFromJSON(content) {
         } else if (msg.type === 'user') {
             var d = document.createElement('div');
             d.className = 'message user-message';
+            d.dataset.messageId = 'msg_' + Date.now() + '_' + Math.random().toString(36).substr(2, 9);
+            var uSender = msg.sender || '铲屎官';
             d.innerHTML = '<div class="message-avatar" style="background:linear-gradient(135deg,#ffd803,#ff8c42);">🧑</div>'
                 + '<div class="message-content">'
-                + '<div class="message-sender">' + escapeHtml(msg.sender || '铲屎官') + '</div>'
+                + '<div class="message-sender">' + escapeHtml(uSender) + '</div>'
                 + '<div class="message-bubble">' + escapeHtml(msg.content) + '</div>'
                 + '<div class="message-time">' + escapeHtml(msg.time || '') + '</div>'
                 + '</div>';
+            var bubble = d.querySelector('.message-bubble');
+            if (bubble) {
+                (function(el, msgId, content, name) {
+                    bubble.addEventListener('contextmenu', function(e) {
+                        if (e.target.closest('.message-reply-ref')) return;
+                        e.preventDefault();
+                        showBubbleContextMenu(e, { id: msgId, content: content, senderName: name });
+                    });
+                })(d, d.dataset.messageId, msg.content, uSender);
+            }
             chatEl.appendChild(d);
-            messages.push({ role: 'user', name: msg.sender || '铲屎官', content: msg.content });
+            messages.push({ role: 'user', name: uSender, content: msg.content, id: d.dataset.messageId });
         } else if (msg.type === 'cat') {
             var senderName = msg.sender || '猫猫';
             // Try to find matching cat for avatar styling
@@ -4683,6 +4947,7 @@ function importChatFromJSON(content) {
 
             var d = document.createElement('div');
             d.className = 'message cat-message wf-msg' + nightClass;
+            d.dataset.messageId = 'msg_' + Date.now() + '_' + Math.random().toString(36).substr(2, 9);
             if (msg.isNight) d.dataset.wfNight = 'true';
             d.innerHTML = '<div class="message-avatar" style="' + avatarBg + '">' + avatarContent + '</div>'
                 + '<div class="message-content">'
@@ -4690,8 +4955,18 @@ function importChatFromJSON(content) {
                 + '<div class="message-bubble" data-real="' + escapeHtml(msg.content) + '">' + renderMarkdownLite(msg.content) + '</div>'
                 + '<div class="message-time">' + escapeHtml(msg.time || '') + '</div>'
                 + '</div>';
+            var bubble = d.querySelector('.message-bubble');
+            if (bubble) {
+                (function(el, msgId, content, name) {
+                    bubble.addEventListener('contextmenu', function(e) {
+                        if (e.target.closest('.message-reply-ref')) return;
+                        e.preventDefault();
+                        showBubbleContextMenu(e, { id: msgId, content: content, senderName: name });
+                    });
+                })(d, d.dataset.messageId, msg.content, senderName);
+            }
             chatEl.appendChild(d);
-            messages.push({ role: 'assistant', name: senderName, content: msg.content });
+            messages.push({ role: 'assistant', name: senderName, content: msg.content, id: d.dataset.messageId });
         }
     });
 
@@ -4745,14 +5020,25 @@ function importChatFromTXT(content) {
                 if (isUser) {
                     var d = document.createElement('div');
                     d.className = 'message user-message';
+                    d.dataset.messageId = 'msg_' + Date.now() + '_' + Math.random().toString(36).substr(2, 9);
                     d.innerHTML = '<div class="message-avatar" style="background:linear-gradient(135deg,#ffd803,#ff8c42);">🧑</div>'
                         + '<div class="message-content">'
                         + '<div class="message-sender">' + escapeHtml(sender) + '</div>'
                         + '<div class="message-bubble">' + escapeHtml(text) + '</div>'
                         + '<div class="message-time">' + escapeHtml(time) + '</div>'
                         + '</div>';
+                    var bubble = d.querySelector('.message-bubble');
+                    if (bubble) {
+                        (function(el, msgId, content, name) {
+                            bubble.addEventListener('contextmenu', function(e) {
+                                if (e.target.closest('.message-reply-ref')) return;
+                                e.preventDefault();
+                                showBubbleContextMenu(e, { id: msgId, content: content, senderName: name });
+                            });
+                        })(d, d.dataset.messageId, text, sender);
+                    }
                     chatEl.appendChild(d);
-                    messages.push({ role: 'user', name: sender, content: text });
+                    messages.push({ role: 'user', name: sender, content: text, id: d.dataset.messageId });
                 } else {
                     var matchCat = cats.find(function(c) { return sender.indexOf(c.name) !== -1; });
                     var avatarBg = matchCat
@@ -4764,6 +5050,7 @@ function importChatFromTXT(content) {
 
                     var d = document.createElement('div');
                     d.className = 'message cat-message wf-msg' + nightClass;
+                    d.dataset.messageId = 'msg_' + Date.now() + '_' + Math.random().toString(36).substr(2, 9);
                     if (isNight) d.dataset.wfNight = 'true';
                     d.innerHTML = '<div class="message-avatar" style="' + avatarBg + '">' + avatarContent + '</div>'
                         + '<div class="message-content">'
@@ -4771,8 +5058,18 @@ function importChatFromTXT(content) {
                         + '<div class="message-bubble" data-real="' + escapeHtml(text) + '">' + renderMarkdownLite(text) + '</div>'
                         + '<div class="message-time">' + escapeHtml(time) + '</div>'
                         + '</div>';
+                    var bubble = d.querySelector('.message-bubble');
+                    if (bubble) {
+                        (function(el, msgId, content, name) {
+                            bubble.addEventListener('contextmenu', function(e) {
+                                if (e.target.closest('.message-reply-ref')) return;
+                                e.preventDefault();
+                                showBubbleContextMenu(e, { id: msgId, content: content, senderName: name });
+                            });
+                        })(d, d.dataset.messageId, text, sender);
+                    }
                     chatEl.appendChild(d);
-                    messages.push({ role: 'assistant', name: sender, content: text });
+                    messages.push({ role: 'assistant', name: sender, content: text, id: d.dataset.messageId });
                 }
             } else {
                 // Unrecognized line, treat as system message

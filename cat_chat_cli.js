@@ -276,6 +276,9 @@ function resolveWorkingDirectory(raw) {
     return resolved;
 }
 
+const INACTIVITY_TIMEOUT_MS = 3 * 60 * 1000; // 3 minutes without output = stuck
+const MAX_INACTIVITY_RETRIES = 3;
+
 function runMinimalClaude(prompt, timeoutMs, switchCommand, workingDir, onAnthropicModel, onCliLog) {
     return new Promise(function(resolve, reject) {
         const scriptPath = path.join(__dirname, 'minimal-claude.js');
@@ -310,7 +313,8 @@ function runMinimalClaude(prompt, timeoutMs, switchCommand, workingDir, onAnthro
                 stdio: ['ignore', 'pipe', 'pipe'],
                 env: Object.assign({}, process.env, {
                     CATCHAT_PROMPT_B64: Buffer.from(String(prompt || ''), 'utf-8').toString('base64'),
-                    CATCHAT_WORKDIR: effectiveWorkDir
+                    CATCHAT_WORKDIR: effectiveWorkDir,
+                    CATCHAT_CLI_VERBOSE: '1'
                 })
             });
         } else {
@@ -319,7 +323,8 @@ function runMinimalClaude(prompt, timeoutMs, switchCommand, workingDir, onAnthro
                 cwd: effectiveWorkDir,
                 stdio: ['ignore', 'pipe', 'pipe'],
                 env: Object.assign({}, process.env, {
-                    CATCHAT_WORKDIR: effectiveWorkDir
+                    CATCHAT_WORKDIR: effectiveWorkDir,
+                    CATCHAT_CLI_VERBOSE: '1'
                 })
             });
         }
@@ -333,14 +338,32 @@ function runMinimalClaude(prompt, timeoutMs, switchCommand, workingDir, onAnthro
         let scriptFinishSeen = false;
         let forceCloseTimer = null;
 
-        const timer = setTimeout(function() {
+        const timer = timeoutMs > 0 ? setTimeout(function() {
             if (settled) return;
             settled = true;
+            clearInterval(inactivityCheck);
             try { child.kill(); } catch (_) {}
             reject(new Error('Claude CLI 调用超时（' + timeoutMs + 'ms）'));
-        }, timeoutMs);
+        }, timeoutMs) : null;
+
+        // Inactivity detection: if no stdout/stderr output for 3 minutes, treat as stuck
+        var lastActivityTs = Date.now();
+        var inactivityCheck = setInterval(function() {
+            if (settled) { clearInterval(inactivityCheck); return; }
+            if (Date.now() - lastActivityTs >= INACTIVITY_TIMEOUT_MS) {
+                settled = true;
+                clearInterval(inactivityCheck);
+                clearTimeout(timer);
+                log('⏰', C.yellow, 'INACTIVITY', 'LLM 已 ' + Math.round(INACTIVITY_TIMEOUT_MS / 60000) + ' 分钟无输出，判定为卡住');
+                try { child.kill(); } catch (_) {}
+                var err = new Error('LLM 无活动超时（' + Math.round(INACTIVITY_TIMEOUT_MS / 60000) + ' 分钟无输出）');
+                err.code = 'INACTIVITY_TIMEOUT';
+                reject(err);
+            }
+        }, 15000);
 
         child.stdout.on('data', function(chunk) {
+            lastActivityTs = Date.now();
             const text = chunk.toString('utf-8');
             stdout += text;
 
@@ -366,6 +389,7 @@ function runMinimalClaude(prompt, timeoutMs, switchCommand, workingDir, onAnthro
         });
 
         child.stderr.on('data', function(chunk) {
+            lastActivityTs = Date.now();
             const text = chunk.toString('utf-8');
             stderr += text;
 
@@ -391,6 +415,7 @@ function runMinimalClaude(prompt, timeoutMs, switchCommand, workingDir, onAnthro
             if (settled) return;
             settled = true;
             clearTimeout(timer);
+            clearInterval(inactivityCheck);
             reject(err);
         });
 
@@ -398,6 +423,7 @@ function runMinimalClaude(prompt, timeoutMs, switchCommand, workingDir, onAnthro
             if (settled) return;
             settled = true;
             clearTimeout(timer);
+            clearInterval(inactivityCheck);
             if (forceCloseTimer) {
                 clearTimeout(forceCloseTimer);
                 forceCloseTimer = null;
@@ -428,6 +454,14 @@ function runMinimalClaude(prompt, timeoutMs, switchCommand, workingDir, onAnthro
                 if (t.indexOf('Claude process exited with code:') === 0) return false;
                 if (t.indexOf('Claude process ended by signal:') === 0) return false;
                 if (/^The Claude Code environment has been switched to\s*\[/i.test(t)) return false;
+                // Filter out verbose/process log lines that may leak from Claude CLI
+                if (t.indexOf('[verbose]') === 0) return false;
+                if (t.indexOf('TOKEN_USAGE ') === 0) return false;
+                if (t.indexOf('ANTHROPIC_MODEL=') === 0) return false;
+                // Filter stream-json lines (should not appear in plain text, but guard)
+                if (t.charAt(0) === '{' && t.charAt(t.length - 1) === '}') {
+                    try { var ev = JSON.parse(t); if (ev && ev.type) return false; } catch (_) {}
+                }
                 return true;
             });
             const replyText = filtered.join('\n').trim();
@@ -1015,8 +1049,8 @@ const server = http.createServer(function(req, res) {
             }
 
             const prompt = String(payload.prompt || '').trim();
-            const timeoutMsRaw = Number(payload.timeoutMs || 240000);
-            const timeoutMs = Number.isFinite(timeoutMsRaw) ? Math.max(10000, Math.min(18000000, timeoutMsRaw)) : 3600000;
+            const timeoutMsRaw = Number(payload.timeoutMs || 0);
+            const timeoutMs = (timeoutMsRaw > 0 && Number.isFinite(timeoutMsRaw)) ? timeoutMsRaw : 0;
             const source = String(payload.source || '').trim();
             const phase = String(payload.phase || '').trim();
             const catName = String(payload.catName || '').trim();
@@ -1072,14 +1106,35 @@ const server = http.createServer(function(req, res) {
             }
 
             const startTime = Date.now();
-            const runPromise = runMinimalClaude(prompt, timeoutMs, switchCommand, workingDir, function(model) {
-                    log('  ', C.dim, '  ANTHROPIC_MODEL', model || '(empty)');
-                }, function(stream, line) {
-                    const channel = stream === 'stderr' ? 'CLI[err]' : 'CLI[out]';
-                    log('  ', C.dim, '  ' + channel, String(line || '').slice(0, 400));
-                });
+            var cliLogFn = function(stream, line) {
+                const channel = stream === 'stderr' ? 'CLI[err]' : 'CLI[out]';
+                log('  ', C.dim, '  ' + channel, String(line || '').slice(0, 400));
+            };
+            var modelLogFn = function(model) {
+                log('  ', C.dim, '  ANTHROPIC_MODEL', model || '(empty)');
+            };
 
-            runPromise
+            // Auto-retry on inactivity timeout: send "继续" to unstick the LLM
+            var currentPrompt = prompt;
+            var attempt = 0;
+
+            function attemptRun() {
+                return runMinimalClaude(currentPrompt, timeoutMs, switchCommand, workingDir, modelLogFn, cliLogFn)
+                    .then(function(result) {
+                        return result;
+                    })
+                    .catch(function(err) {
+                        if (err.code === 'INACTIVITY_TIMEOUT' && attempt < MAX_INACTIVITY_RETRIES) {
+                            attempt++;
+                            log('🔄', C.yellow, `CLAUDE #${reqId}`, '第 ' + attempt + ' 次无活动超时，发送"继续"重试...');
+                            currentPrompt = prompt + '\n\n（系统提示：你之前的回复似乎中断了，请继续完成任务。）';
+                            return attemptRun();
+                        }
+                        throw err;
+                    });
+            }
+
+            attemptRun()
                 .then(function(result) {
                     const elapsed = Date.now() - startTime;
                     let pipeline = null;
