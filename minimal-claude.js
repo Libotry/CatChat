@@ -507,6 +507,11 @@ let hasAssistantText = false;
 let plainTextMode = false;
 let lastUsageLine = '';
 let lastCumulativeText = '';
+// Buffer all stream-json events so we can extract only the final reply at the end,
+// matching the server-mode logic (lines 271-293). This prevents intermediate
+// assistant messages (tool-call descriptions, process logs) from leaking into stdout.
+const streamEventBuffer = [];
+const plainTextBuffer = [];
 
 function pickUsage(obj) {
   if (!obj || typeof obj !== 'object') return null;
@@ -593,25 +598,19 @@ function collectTextBlocks(value, cumulative, out) {
 }
 
 function emitTextFromEvent(event) {
+  // Buffer the event for final extraction instead of writing intermediate text to stdout.
+  // The actual text extraction happens in the 'close' handler using the same logic
+  // as server mode to ensure only the final reply is output.
+  streamEventBuffer.push(event);
+
+  // Still track hasAssistantText for the close handler's "no text" message.
   const blocks = [];
   collectTextBlocks(event, false, blocks);
   for (const block of blocks) {
     const text = String(block && block.text || '');
-    if (!text) continue;
-    hasAssistantText = true;
-    if (block.cumulative) {
-      if (text.startsWith(lastCumulativeText)) {
-        const suffix = text.slice(lastCumulativeText.length);
-        if (suffix) process.stdout.write(suffix);
-      } else if (lastCumulativeText && lastCumulativeText.startsWith(text)) {
-        // Ignore regressive partial snapshots.
-      } else {
-        process.stdout.write(text);
-      }
-      lastCumulativeText = text;
-    } else {
-      process.stdout.write(text);
-      lastCumulativeText += text;
+    if (text) {
+      hasAssistantText = true;
+      break;
     }
   }
 }
@@ -635,12 +634,10 @@ rl.on('line', (line) => {
     }
     // Some Claude CLI versions return plain text instead of stream-json lines.
     // Fall back gracefully instead of treating this as an error.
-    if (!plainTextMode && hasAssistantText) {
-      process.stdout.write('\n');
-    }
+    // Buffer plain text for final output instead of writing immediately.
     plainTextMode = true;
     hasAssistantText = true;
-    process.stdout.write(trimmed + '\n');
+    plainTextBuffer.push(trimmed);
     return;
   }
 
@@ -663,6 +660,40 @@ child.on('error', (err) => {
 
 child.on('close', (code, signal) => {
   rl.close();
+
+  // Extract the final reply using the same logic as server mode (lines 271-293).
+  // This ensures only the final assistant text is output, not intermediate
+  // tool-call descriptions or process logs.
+  let finalReply = '';
+  if (streamEventBuffer.length > 0) {
+    let resultText = '';
+    let lastAssistantText = '';
+    for (const ev of streamEventBuffer) {
+      const type = ev.type || '';
+      if (type === 'result' && ev.subtype === 'success') {
+        const rt = String(ev.result || '').trim();
+        if (rt) resultText = rt;
+      } else if (type === 'assistant' && ev.message) {
+        const content = ev.message.content;
+        if (Array.isArray(content)) {
+          const texts = content
+            .filter((b) => b.type === 'text' && b.text)
+            .map((b) => b.text)
+            .join('\n');
+          if (texts) lastAssistantText = texts;
+        }
+      }
+    }
+    finalReply = (resultText || lastAssistantText).trim();
+  } else if (plainTextBuffer.length > 0) {
+    // Plain-text fallback (non-JSON output from older Claude CLI versions)
+    finalReply = plainTextBuffer.join('\n').trim();
+  }
+
+  if (finalReply) {
+    process.stdout.write(finalReply);
+    hasAssistantText = true;
+  }
 
   if (!hasAssistantText) {
     console.log('\n[No assistant text found in stream output]');
