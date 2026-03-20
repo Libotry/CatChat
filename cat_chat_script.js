@@ -2721,15 +2721,6 @@ function addUserMessage(text, label, replyTo) {
 
     d.innerHTML = '<div class="message-avatar" style="background:linear-gradient(135deg,#ffd803,#ff8c42);">🧑</div><div class="message-content"><div class="message-sender">' + label + '</div>' + replyHtml + '<div class="message-bubble">' + escapeHtml(text) + '</div><div class="message-time">' + getTimeStr() + '</div></div>';
 
-    // 右键气泡弹出菜单
-    var bubble = d.querySelector('.message-bubble');
-    if (bubble) {
-        bubble.addEventListener('contextmenu', function(e) {
-            if (e.target.closest('.message-reply-ref')) return;
-            e.preventDefault();
-            showBubbleContextMenu(e, { id: d.dataset.messageId, content: text, senderName: label });
-        });
-    }
 
     document.getElementById('chatMessages').appendChild(d);
     scrollToBottom();
@@ -2763,44 +2754,63 @@ function cancelReply() {
     if (indicator) indicator.classList.remove('active');
 }
 
-// 右键气泡上下文菜单
+// 右键气泡上下文菜单（事件委托模式：在 chatMessages 容器上统一监听）
 (function() {
     var menuEl = null;
     function removeMenu() {
         if (menuEl) { menuEl.remove(); menuEl = null; }
     }
-    document.addEventListener('click', removeMenu);
-    document.addEventListener('contextmenu', function(e) {
-        if (!e.target.closest('.bubble-context-menu')) removeMenu();
-    });
-    window.showBubbleContextMenu = function(e, msgInfo) {
+
+    function doCopy(text) {
+        if (navigator.clipboard && navigator.clipboard.writeText) {
+            navigator.clipboard.writeText(text).then(function() {
+                showToast('已复制到剪贴板');
+            }).catch(function() {
+                fallbackCopy(text);
+            });
+        } else {
+            fallbackCopy(text);
+        }
+    }
+    function fallbackCopy(text) {
+        var ta = document.createElement('textarea');
+        ta.value = text;
+        ta.style.cssText = 'position:fixed;left:-9999px;top:-9999px;opacity:0;';
+        document.body.appendChild(ta);
+        ta.select();
+        try {
+            document.execCommand('copy');
+            showToast('已复制到剪贴板');
+        } catch (_) {
+            showToast('复制失败，请手动选择复制');
+        }
+        ta.remove();
+    }
+
+    function showContextMenu(e, msgInfo) {
         removeMenu();
         var menu = document.createElement('div');
         menu.className = 'bubble-context-menu';
 
-        var btnQuote = document.createElement('button');
-        btnQuote.innerHTML = '📎 引用';
-        btnQuote.onclick = function() {
-            setReplyTarget({ id: msgInfo.id, content: msgInfo.content, senderName: msgInfo.senderName });
-            removeMenu();
-        };
-
         var btnCopy = document.createElement('button');
-        btnCopy.innerHTML = '📋 复制';
-        btnCopy.onclick = function() {
-            navigator.clipboard.writeText(msgInfo.content).catch(function() {
-                var ta = document.createElement('textarea');
-                ta.value = msgInfo.content;
-                document.body.appendChild(ta);
-                ta.select();
-                document.execCommand('copy');
-                ta.remove();
-            });
+        btnCopy.textContent = '📋 复制';
+        btnCopy.addEventListener('click', function(ev) {
+            ev.stopPropagation();
+            doCopy(msgInfo.content);
             removeMenu();
-        };
+        });
 
-        menu.appendChild(btnQuote);
+        var btnQuote = document.createElement('button');
+        btnQuote.textContent = '📎 引用';
+        btnQuote.addEventListener('click', function(ev) {
+            ev.stopPropagation();
+            setReplyTarget({ id: msgInfo.id, content: msgInfo.content, senderName: msgInfo.senderName });
+            showToast('已引用 ' + (msgInfo.senderName || '') + ' 的消息');
+            removeMenu();
+        });
+
         menu.appendChild(btnCopy);
+        menu.appendChild(btnQuote);
         document.body.appendChild(menu);
         menuEl = menu;
 
@@ -2809,9 +2819,61 @@ function cancelReply() {
         var mw = menu.offsetWidth || 140, mh = menu.offsetHeight || 80;
         if (x + mw > window.innerWidth) x = window.innerWidth - mw - 8;
         if (y + mh > window.innerHeight) y = window.innerHeight - mh - 8;
+        if (x < 0) x = 8;
+        if (y < 0) y = 8;
         menu.style.left = x + 'px';
         menu.style.top = y + 'px';
-    };
+    }
+
+    // 暴露给旧代码兼容（部分导入聊天记录仍然直接调用）
+    window.showBubbleContextMenu = showContextMenu;
+
+    // === 事件委托：统一在 chatMessages 上监听右键 ===
+    function initChatContextMenu() {
+        var chatEl = document.getElementById('chatMessages');
+        if (!chatEl) return;
+
+        chatEl.addEventListener('contextmenu', function(e) {
+            // 如果右键点击在引用回复区域，放行默认行为
+            if (e.target.closest('.message-reply-ref')) return;
+
+            // 查找最近的 .message-bubble 祖先
+            var bubble = e.target.closest('.message-bubble');
+            if (!bubble) return;
+
+            // 查找所属的 .message 容器
+            var msgDiv = bubble.closest('.message');
+            if (!msgDiv) return;
+
+            e.preventDefault();
+            e.stopPropagation();
+
+            // 提取消息数据
+            var messageId = msgDiv.dataset.messageId || '';
+            // 优先使用 data-real 属性（原始文本），否则用 textContent
+            var content = bubble.getAttribute('data-real') || bubble.textContent || '';
+            // 发送者名字从 .message-sender 提取
+            var senderEl = msgDiv.querySelector('.message-sender');
+            var senderName = senderEl ? senderEl.textContent.replace(/\s*🌙\s*$/, '').trim() : '未知';
+
+            showContextMenu(e, { id: messageId, content: content, senderName: senderName });
+        });
+
+        // 滚动时关闭菜单
+        chatEl.addEventListener('scroll', removeMenu);
+    }
+    // 脚本在 </body> 前加载，DOM 已就绪，直接初始化
+    initChatContextMenu();
+
+    // 关闭菜单的各种方式
+    document.addEventListener('click', function(e) {
+        if (menuEl && !e.target.closest('.bubble-context-menu')) {
+            removeMenu();
+        }
+    });
+    document.addEventListener('keydown', function(e) {
+        if (e.key === 'Escape') removeMenu();
+    });
 })();
 
 // 滚动到指定消息
@@ -2867,16 +2929,6 @@ function addCatMessage(cat, text, isNight, replyTo) {
     }
 
     d.innerHTML = '<div class="message-avatar" style="background:linear-gradient(135deg,' + cat.color + ',' + adjustColor(cat.color, -20) + ');" onmouseenter="showCatTooltip(\'' + cat.id + '\',event)" onmouseleave="hideCatTooltip()">' + catAvatarHtml(cat) + '</div><div class="message-content"><div class="message-sender">' + escapeHtml(cat.name) + nightLabel + senderRoleHtml + '</div>' + replyHtml + '<div class="message-bubble" data-real="' + escapeHtml(text) + '">' + displayText + '</div><div class="message-time">' + getTimeStr() + '</div></div>';
-
-    // 右键气泡弹出菜单
-    var bubble = d.querySelector('.message-bubble');
-    if (bubble) {
-        bubble.addEventListener('contextmenu', function(e) {
-            if (e.target.closest('.message-reply-ref')) return;
-            e.preventDefault();
-            showBubbleContextMenu(e, { id: d.dataset.messageId, content: text, senderName: cat.name });
-        });
-    }
 
     document.getElementById('chatMessages').appendChild(d);
     if (werewolfShouldHideNightRoleBadge(isNight)) {
@@ -4922,16 +4974,6 @@ function importChatFromJSON(content) {
                 + '<div class="message-bubble">' + escapeHtml(msg.content) + '</div>'
                 + '<div class="message-time">' + escapeHtml(msg.time || '') + '</div>'
                 + '</div>';
-            var bubble = d.querySelector('.message-bubble');
-            if (bubble) {
-                (function(el, msgId, content, name) {
-                    bubble.addEventListener('contextmenu', function(e) {
-                        if (e.target.closest('.message-reply-ref')) return;
-                        e.preventDefault();
-                        showBubbleContextMenu(e, { id: msgId, content: content, senderName: name });
-                    });
-                })(d, d.dataset.messageId, msg.content, uSender);
-            }
             chatEl.appendChild(d);
             messages.push({ role: 'user', name: uSender, content: msg.content, id: d.dataset.messageId });
         } else if (msg.type === 'cat') {
@@ -4955,16 +4997,6 @@ function importChatFromJSON(content) {
                 + '<div class="message-bubble" data-real="' + escapeHtml(msg.content) + '">' + renderMarkdownLite(msg.content) + '</div>'
                 + '<div class="message-time">' + escapeHtml(msg.time || '') + '</div>'
                 + '</div>';
-            var bubble = d.querySelector('.message-bubble');
-            if (bubble) {
-                (function(el, msgId, content, name) {
-                    bubble.addEventListener('contextmenu', function(e) {
-                        if (e.target.closest('.message-reply-ref')) return;
-                        e.preventDefault();
-                        showBubbleContextMenu(e, { id: msgId, content: content, senderName: name });
-                    });
-                })(d, d.dataset.messageId, msg.content, senderName);
-            }
             chatEl.appendChild(d);
             messages.push({ role: 'assistant', name: senderName, content: msg.content, id: d.dataset.messageId });
         }
@@ -5027,16 +5059,6 @@ function importChatFromTXT(content) {
                         + '<div class="message-bubble">' + escapeHtml(text) + '</div>'
                         + '<div class="message-time">' + escapeHtml(time) + '</div>'
                         + '</div>';
-                    var bubble = d.querySelector('.message-bubble');
-                    if (bubble) {
-                        (function(el, msgId, content, name) {
-                            bubble.addEventListener('contextmenu', function(e) {
-                                if (e.target.closest('.message-reply-ref')) return;
-                                e.preventDefault();
-                                showBubbleContextMenu(e, { id: msgId, content: content, senderName: name });
-                            });
-                        })(d, d.dataset.messageId, text, sender);
-                    }
                     chatEl.appendChild(d);
                     messages.push({ role: 'user', name: sender, content: text, id: d.dataset.messageId });
                 } else {
@@ -5058,16 +5080,6 @@ function importChatFromTXT(content) {
                         + '<div class="message-bubble" data-real="' + escapeHtml(text) + '">' + renderMarkdownLite(text) + '</div>'
                         + '<div class="message-time">' + escapeHtml(time) + '</div>'
                         + '</div>';
-                    var bubble = d.querySelector('.message-bubble');
-                    if (bubble) {
-                        (function(el, msgId, content, name) {
-                            bubble.addEventListener('contextmenu', function(e) {
-                                if (e.target.closest('.message-reply-ref')) return;
-                                e.preventDefault();
-                                showBubbleContextMenu(e, { id: msgId, content: content, senderName: name });
-                            });
-                        })(d, d.dataset.messageId, text, sender);
-                    }
                     chatEl.appendChild(d);
                     messages.push({ role: 'assistant', name: sender, content: text, id: d.dataset.messageId });
                 }
