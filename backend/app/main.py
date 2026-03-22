@@ -13,7 +13,6 @@ from app.api.deps import room_manager
 from app.config.frontend_profile_env import load_frontend_profile
 from app.api.rest import router as rest_router
 from app.websocket.handler import ws_manager
-
 from app.api.mcp_routes import router as mcp_router
 from app.api.autonomous_chat_routes import router as autonomous_chat_router
 from app.api.autonomous_chat_ws import autonomous_chat_websocket_endpoint
@@ -35,11 +34,62 @@ app.add_middleware(
 )
 
 app.include_router(rest_router)
-
 app.include_router(mcp_router)
-
 app.include_router(autonomous_chat_router)
 
+# ─── Feishu Integration ──────────────────────────────────────────
+
+_feishu_initialized = False
+
+
+@app.on_event("startup")
+async def feishu_startup() -> None:
+    """Initialize Feishu integration on app startup."""
+    global _feishu_initialized
+
+    try:
+        from app.integration.feishu.config import get_feishu_config
+        from app.integration.feishu.feishu_router import router as feishu_router
+        from app.integration.feishu.feishu_client import FeishuClient
+        from app.integration.feishu.token_manager import get_token_manager
+        from app.integration.feishu.feishu_handler import FeishuHandler, set_feishu_handler
+        from app.integration.feishu.ws_bridge import setup_feishu_bridge
+    except Exception as e:
+        logger.warning("Feishu integration module not available: %s", e)
+        return
+
+    config = get_feishu_config()
+    if not config.is_enabled():
+        logger.info("Feishu integration disabled (FEISHU_APP_ID not set)")
+        return
+
+    try:
+        # Register routes
+        app.include_router(feishu_router)
+        logger.info("Feishu router registered")
+
+        # Initialize handler
+        tm = get_token_manager(config.app_id, config.app_secret)
+        client = FeishuClient(tm)
+        handler = FeishuHandler(
+            feishu_client=client,
+            room_manager=room_manager,
+            ws_manager=ws_manager,
+        )
+        set_feishu_handler(handler)
+        logger.info("Feishu handler initialized for app_id=%s", config.app_id)
+
+        # Start WS bridge (subscribes to CatChat events → forwards to Feishu)
+        await setup_feishu_bridge(handler, room_manager, ws_manager)
+        logger.info("Feishu WS bridge started")
+
+        _feishu_initialized = True
+
+    except Exception:
+        logger.exception("Failed to initialize Feishu integration")
+
+
+# ─── Health ────────────────────────────────────────────────────
 
 @app.get("/health")
 def health() -> dict:
@@ -48,13 +98,16 @@ def health() -> dict:
         "service": "werewolf-backend",
         "summary": room_manager.health_summary(),
         "auto_bootstrap": getattr(app.state, "auto_bootstrap", {"status": "not-run"}),
+        "feishu": {"initialized": _feishu_initialized},
     }
 
 
 @app.on_event("startup")
 async def auto_bootstrap_on_startup() -> None:
     try:
-        auto_bootstrap_enabled = str(os.getenv("CATCHAT_AUTO_BOOTSTRAP_ON_STARTUP", "1")).strip().lower() in {"1", "true", "yes", "on"}
+        auto_bootstrap_enabled = str(
+            os.getenv("CATCHAT_AUTO_BOOTSTRAP_ON_STARTUP", "1")
+        ).strip().lower() in {"1", "true", "yes", "on"}
         if not auto_bootstrap_enabled:
             app.state.auto_bootstrap = {
                 "status": "skipped",
@@ -75,7 +128,10 @@ async def auto_bootstrap_on_startup() -> None:
         bootstrap_result = result.get("bootstrap") if isinstance(result, dict) else {}
         bootstrap_mode = None
         if isinstance(bootstrap_result, dict):
-            bootstrap_mode = bootstrap_result.get("startup_mode") or bootstrap_result.get("mode")
+            bootstrap_mode = (
+                bootstrap_result.get("startup_mode")
+                or bootstrap_result.get("mode")
+            )
             if bootstrap_mode is None and bootstrap_result.get("reused") is True:
                 bootstrap_mode = "reused"
         app.state.auto_bootstrap = {
@@ -84,7 +140,9 @@ async def auto_bootstrap_on_startup() -> None:
             "player_count": result.get("player_count"),
             "source": result.get("source"),
             "bootstrap_mode": bootstrap_mode,
-            "bootstrap": bootstrap_result if isinstance(bootstrap_result, dict) else None,
+            "bootstrap": bootstrap_result
+            if isinstance(bootstrap_result, dict)
+            else None,
         }
     except Exception as exc:  # noqa: BLE001
         logger.exception("auto bootstrap from env failed")
@@ -98,9 +156,20 @@ async def auto_bootstrap_on_startup() -> None:
 async def cleanup_on_shutdown() -> None:
     try:
         await asyncio.to_thread(room_manager.shutdown_cleanup)
-        logger.info("graceful shutdown cleanup completed: child agent ports released")
+        logger.info(
+            "graceful shutdown cleanup completed: child agent ports released"
+        )
     except Exception as exc:  # noqa: BLE001
         logger.exception("shutdown cleanup failed: %s", exc)
+
+    # Stop Feishu WS bridge
+    try:
+        from app.integration.feishu.ws_bridge import get_feishu_ws_bridge
+        bridge = get_feishu_ws_bridge()
+        if bridge:
+            await bridge.stop()
+    except Exception:
+        pass
 
 
 def _active_players_for_phase(room) -> list[str]:
@@ -149,112 +218,3 @@ async def room_ws(websocket: WebSocket, room_id: str, player_id: str) -> None:
 async def autonomous_chat_ws(websocket: WebSocket, room_id: str) -> None:
     """自主聊天 WebSocket 端点 - 实时接收 AI 猫对话消息"""
     await autonomous_chat_websocket_endpoint(websocket, room_id)
-
-
-@app.websocket("/ws/chat/{room_id}")
-async def autonomous_chat_ws(websocket: WebSocket, room_id: str) -> None:
-    """自主聊天 WebSocket 端点 - 实时接收 AI 猫对话消息"""
-    await autonomous_chat_websocket_endpoint(websocket, room_id)
-
-
-@app.websocket("/ws/chat/{room_id}")
-async def autonomous_chat_ws(websocket: WebSocket, room_id: str) -> None:
-    """自主聊天 WebSocket 端点 - 实时接收 AI 猫对话消息"""
-    await autonomous_chat_websocket_endpoint(websocket, room_id)
-    try:
-        room = room_manager.must_get_room(room_id)
-        room.engine.mark_online_status(player_id, True)
-        await ws_manager.broadcast(
-            room_id,
-            "agent_status_update",
-            {
-                "player_id": player_id,
-                "status": "online",
-                "last_heartbeat": datetime.utcnow().isoformat() + "Z",
-                "error_msg": None,
-            },
-        )
-
-        while True:
-            raw = await websocket.receive_text()
-            msg = json.loads(raw)
-            event = msg.get("event") or msg.get("type")
-            payload = msg.get("payload", {})
-
-            if event == "subscribe":
-                view_mode = msg.get("view_mode", "god")
-                await ws_manager.update_view_mode(websocket, view_mode)
-                await ws_manager.send_event(
-                    websocket,
-                    "subscribed",
-                    {
-                        "room_id": room_id,
-                        "player_id": player_id,
-                        "view_mode": view_mode,
-                    },
-                )
-                await ws_manager.broadcast_room_state(room_id, room.engine.public_state())
-                continue
-
-            if event == "change_view":
-                view_mode = msg.get("mode", "god")
-                await ws_manager.update_view_mode(websocket, view_mode)
-                await ws_manager.send_event(
-                    websocket,
-                    "view_changed",
-                    {
-                        "room_id": room_id,
-                        "player_id": player_id,
-                        "view_mode": view_mode,
-                    },
-                )
-                await ws_manager.broadcast_room_state(room_id, room.engine.public_state())
-                continue
-
-            if event == "advance":
-                room.engine.timeout_autorun_current_phase()
-            elif event == "night_action":
-                room.engine.submit_night_action(
-                    actor_id=payload["player_id"],
-                    target_id=payload.get("target_id"),
-                    save=payload.get("save"),
-                )
-            elif event == "vote":
-                room.engine.submit_vote(payload["player_id"], payload.get("target_id"))
-            elif event == "hunter_shot":
-                room.engine.submit_hunter_shot(payload["player_id"], payload["target_id"])
-
-            state = room.engine.public_state()
-            await ws_manager.broadcast_room_state(room_id, state)
-            await ws_manager.broadcast_phase_changed(
-                room_id=room_id,
-                payload={
-                    "phase": state["phase"],
-                    "remaining_time": 60,
-                    "active_players": _active_players_for_phase(room),
-                },
-                god_view=_god_view_for_phase(room),
-            )
-
-            if state["game_over"]:
-                room_manager.remove_room_if_game_over(room_id)
-
-    except WebSocketDisconnect:
-        room = room_manager.get_room(room_id)
-        if room:
-            room.engine.mark_online_status(player_id, False)
-            await ws_manager.broadcast(
-                room_id,
-                "agent_status_update",
-                {
-                    "player_id": player_id,
-                    "status": "offline",
-                    "last_heartbeat": datetime.utcnow().isoformat() + "Z",
-                    "error_msg": None,
-                },
-            )
-        await ws_manager.disconnect(room_id, websocket)
-    except Exception as exc:
-        await websocket.send_json({"event": "error", "payload": {"message": str(exc)}})
-        await asyncio.sleep(0.1)
-        await ws_manager.disconnect(room_id, websocket)
