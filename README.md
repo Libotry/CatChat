@@ -406,3 +406,8 @@ server.tool(
 ## 📚 更多文档
 
 - 流水线多端口多进程使用说明：`docs/pipeline_multi_cli_usage.md`
+
+## 狼人杀效果图示
+
+<img width="717" height="11294" alt="image" src="https://github.com/user-attachments/assets/87ee2967-28af-469e-80f0-1151890b0b95" />
+
