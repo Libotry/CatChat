@@ -177,7 +177,14 @@ class AutonomousChatOrchestrator:
         if lead_cat_id and lead_cat_id in session.participants:
             session.lead_cat_id = lead_cat_id
             session.lead_cat_verified = True
-            logger.info(f"Lead cat set: {lead_cat_id}")
+            logger.info(f"Lead cat set by user: {lead_cat_id}")
+        elif session.participants:
+            # 自动选择：从未指定时，随机选一只猫作为主导猫
+            import random
+            chosen = random.choice(list(session.participants.keys()))
+            session.lead_cat_id = chosen
+            session.lead_cat_verified = True
+            logger.info(f"[lead-cat] Auto-selected lead cat: {chosen}")
 
         self.sessions[room_id] = session
         logger.info(f"Created {mode.value} session in {room_id} with {len(participants)} participants, chain_max_turns={chain_turns}")
@@ -209,13 +216,14 @@ class AutonomousChatOrchestrator:
         session.is_active = True
 
         if session.mode == ChatMode.HANDOFF_CHAIN:
-            # HANDOFF_CHAIN 模式：不启动轮询循环
-            # 会话仅标记为 active，等待 handle_user_message() 触发链式执行
+            # HANDOFF_CHAIN 模式：
+            # 1. 标记为 active，等待 handle_user_message() 触发链式执行
+            # 2. 同时运行 _chat_loop 以处理 lead cat 空闲超时触发议题
             logger.info(
                 f"Started HANDOFF_CHAIN session in {room_id}, "
-                f"waiting for messages via handle_user_message()"
+                f"waiting for messages + lead-cat idle timeout"
             )
-            return
+            # 继续往下走，启动 _chat_loop
 
         # 其他模式：启动后台轮询任务
         task = asyncio.create_task(self._chat_loop(room_id))
