@@ -427,6 +427,49 @@ const server = http.createServer((req, res) => {
     return;
   }
 
+  // ============ Chat History: 获取聊天历史 (get_chat_history) ============
+  if (req.method === 'GET' && pathname === '/api/callbacks/chat-history') {
+    const { invocationId: reqInvId, callbackToken: reqToken, roomId, limit } = parsedUrl.query;
+
+    if (reqInvId !== invocationId || reqToken !== callbackToken) {
+      res.statusCode = 401;
+      res.end(JSON.stringify({ error: 'Unauthorized' }));
+      return;
+    }
+
+    if (!roomId) {
+      res.statusCode = 400;
+      res.end(JSON.stringify({ error: 'roomId required' }));
+      return;
+    }
+
+    const fs = require('fs');
+    const path = require('path');
+    const jsonlPath = path.join(__dirname, 'chat_history', `${roomId}.jsonl`);
+
+    let messages = [];
+    try {
+      if (fs.existsSync(jsonlPath)) {
+        const content = fs.readFileSync(jsonlPath, 'utf-8');
+        const lines = content.split('\n').filter(l => l.trim());
+        const n = Math.min(parseInt(limit) || 50, lines.length);
+        const recent = lines.slice(-n);
+        messages = recent.map(line => {
+          try { return JSON.parse(line); } catch { return null; }
+        }).filter(Boolean);
+      }
+    } catch (e) {
+      res.statusCode = 500;
+      res.end(JSON.stringify({ error: 'Read failed: ' + e.message }));
+      return;
+    }
+
+    res.statusCode = 200;
+    res.setHeader('Content-Type', 'application/json');
+    res.end(JSON.stringify({ status: 'ok', roomId, messages, count: messages.length }));
+    return;
+  }
+
   // 404 for unknown routes
   res.statusCode = 404;
   res.end(JSON.stringify({ error: 'Not Found' }));

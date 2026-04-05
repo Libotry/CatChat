@@ -18,6 +18,8 @@ from typing import Callable, Dict, List, Optional
 
 import httpx
 
+from app.storage.chat_history_store import get_chat_history_store
+
 logger = logging.getLogger(__name__)
 
 
@@ -103,6 +105,21 @@ class MCPBridgeRoom:
         )
 
         self.message_history.append(message)
+
+        # ── JSONL 持久化 ──
+        try:
+            store = get_chat_history_store()
+            store.append(
+                room_id=self.room_id,
+                sender_id=sender_id,
+                sender_name=sender_name,
+                content=content,
+                message_type=message_type,
+                turn=len(self.message_history),
+            )
+        except Exception as e:
+            logger.warning(f"[Room {self.room_id}] JSONL persist failed: {e}")
+
         logger.info(f"[Room {self.room_id}] {sender_name}: {content[:50]}...")
 
         # 通知订阅者
@@ -162,7 +179,26 @@ class MCPCallbackBridge:
     def get_or_create_room(self, room_id: str) -> MCPBridgeRoom:
         """获取或创建房间的 MCP 桥接"""
         if room_id not in self.rooms:
-            self.rooms[room_id] = MCPBridgeRoom(room_id)
+            room = MCPBridgeRoom(room_id)
+            self.rooms[room_id] = room
+
+            # ── 启动时回放 JSONL 历史 ──
+            try:
+                store = get_chat_history_store()
+                persisted = store.replay(room_id, limit=0)  # 全部回放
+                if persisted:
+                    for pm in persisted:
+                        room.message_history.append(ChatMessage(
+                            sender_id=pm.sender_id,
+                            sender_name=pm.sender_name,
+                            content=pm.content,
+                            timestamp=datetime.fromisoformat(pm.timestamp),
+                            message_type=pm.message_type,
+                        ))
+                    logger.info(f"[Room {room_id}] Replayed {len(persisted)} messages from JSONL")
+            except Exception as e:
+                logger.warning(f"[Room {room_id}] JSONL replay failed: {e}")
+
         return self.rooms[room_id]
     
     def get_room_credentials(self, room_id: str) -> Optional[CallbackCredentials]:

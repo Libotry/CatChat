@@ -347,6 +347,52 @@ server.tool(
   }
 );
 
+// ============ Chat History: 获取聊天历史 (get_chat_history) ============
+server.tool(
+  'cat_cafe_get_chat_history',
+  '读取聊天室的历史消息记录（用于新猫加入时获取上下文，或追溯历史讨论）',
+  {
+    roomId: z.string().describe('房间 ID'),
+    limit: z.number().optional().describe('返回最近 N 条（默认 50，最大 200）'),
+  },
+  async ({ roomId, limit }) => {
+    try {
+      const params = new URLSearchParams({
+        invocationId: INVOCATION_ID,
+        callbackToken: CALLBACK_TOKEN,
+        roomId,
+        limit: String(Math.min(limit || 50, 200)),
+      });
+
+      const response = await fetch(`${API_URL}/api/callbacks/chat-history?${params}`, {
+        method: 'GET',
+      });
+
+      if (response.status === 401) {
+        return { content: [{ type: 'text', text: '❌ Authentication failed' }], isError: true };
+      }
+      if (!response.ok) throw new Error(`HTTP ${response.status}`);
+      const result = await response.json();
+
+      if (!result.messages || result.messages.length === 0) {
+        return { content: [{ type: 'text', text: `(暂无历史记录)` }] };
+      }
+
+      const lines = result.messages.map(m =>
+        `[${m.turn ?? '?'}] ${m.sender_name}: ${m.content.slice(0, 120)}${m.content.length > 120 ? '...' : ''}`
+      );
+      return {
+        content: [{
+          type: 'text',
+          text: `📜 历史记录 (${result.count} 条，来自 ${result.roomId}):\n${lines.join('\n')}`
+        }]
+      };
+    } catch (error) {
+      return { content: [{ type: 'text', text: `❌ Failed: ${error.message}` }], isError: true };
+    }
+  }
+);
+
 // ============ F200-LeadCat: 主导猫投票 (vote_lead_cat) ============
 // 猫猫通过此工具投票给主导猫候选人
 // 调用 CatChat FastAPI (CAT_CHAT_API_URL)，端口默认 8000
