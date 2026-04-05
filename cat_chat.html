@@ -521,6 +521,18 @@
                 <input type="checkbox" id="ppUseClaudeCodeCli" style="width:14px;height:14px;accent-color:#22c55e;"/>
                 <label for="ppUseClaudeCodeCli" style="cursor:pointer;">🤖 使用 Claude Code CLI（通过 minimal-claude.js）</label>
             </div>
+            <div style="margin-top:10px;font-size:12px;color:rgba(255,255,255,0.85);">
+                <div style="display:flex;align-items:center;gap:8px;margin-bottom:4px;">
+                    <span>🎭 猫猫松弛度</span>
+                    <span id="ppMoodLabel" style="font-weight:600;color:#60a5fa;">均衡</span>
+                </div>
+                <div style="display:flex;align-items:center;gap:6px;">
+                    <span style="opacity:0.6;font-size:11px;">🔬严肃</span>
+                    <input type="range" id="ppMoodSlider" min="1" max="5" value="3" step="1" style="flex:1;accent-color:#60a5fa;cursor:pointer;" oninput="pipelineUpdateMoodLabel(this.value)"/>
+                    <span style="opacity:0.6;font-size:11px;">😸放飞</span>
+                </div>
+                <div style="font-size:11px;color:rgba(255,255,255,0.5);margin-top:4px;" id="ppMoodDesc">任务优先，偶尔加入猫猫风格点评</div>
+            </div>
             <div class="pp-role-assign" id="ppRoleAssign"></div>
             <div class="pp-actions">
                 <button class="pp-btn pp-btn-start" id="ppStartBtn" onclick="pipelineStart()">🚀 启动流水线</button>
@@ -774,6 +786,96 @@
 
 <div class="toast-container" id="toastContainer"></div>
 
+<!-- F200-LeadCat: 意图气泡 Sidebar -->
+<div id="intentionSidebar" style="position:fixed;bottom:80px;right:16px;width:280px;max-height:400px;overflow-y:auto;z-index:30;display:none;">
+  <div style="background:rgba(30,30,36,0.95);border:1px solid rgba(255,255,255,0.1);border-radius:12px;padding:12px;backdrop-filter:blur(8px);">
+    <div style="font-size:11px;font-weight:600;color:rgba(255,255,255,0.4);letter-spacing:1px;text-transform:uppercase;margin-bottom:8px;">🐾 猫猫意图</div>
+    <div id="intentionBubbleList"></div>
+  </div>
+</div>
+
+<!-- F200-LeadCat: 意图气泡收起小圆点 -->
+<div id="intentionToggle" onclick="toggleIntentionSidebar()" style="position:fixed;bottom:20px;right:20px;width:40px;height:40px;background:rgba(30,30,36,0.9);border:1px solid rgba(255,255,255,0.15);border-radius:50%;display:none;align-items:center;justify-content:center;cursor:pointer;z-index:31;font-size:18px;" title="意图气泡">🐾</div>
+
 <script src="cat_chat_script.js"></script>
+<script>
+// F200-LeadCat: 意图气泡 UI
+function toggleIntentionSidebar() {
+  const sidebar = document.getElementById('intentionSidebar');
+  const toggle = document.getElementById('intentionToggle');
+  if (sidebar.style.display === 'none') {
+    sidebar.style.display = 'block';
+    toggle.textContent = '✕';
+  } else {
+    sidebar.style.display = 'none';
+    toggle.textContent = '🐾';
+  }
+}
+
+function renderIntentionBubble(entry) {
+  const colors = {
+    analyzing: { bg: 'rgba(59,130,246,0.15)', border: 'rgba(59,130,246,0.4)', text: '#60a5fa', label: '思考中' },
+    implementing: { bg: 'rgba(34,197,94,0.15)', border: 'rgba(34,197,94,0.4)', text: '#4ade80', label: '执行中' },
+    waiting: { bg: 'rgba(168,85,247,0.15)', border: 'rgba(168,85,247,0.4)', text: '#c084fc', label: '等待中' },
+    blocked: { bg: 'rgba(251,191,36,0.15)', border: 'rgba(251,191,36,0.4)', text: '#fbbf24', label: '被阻塞' },
+  };
+  const c = colors[entry.type] || colors.analyzing;
+  const isLeadCat = !!entry.isLeadCat;
+  const leadBorder = isLeadCat ? '1px solid #f59e0b;' : '';
+  const crown = isLeadCat ? '👑 ' : '';
+  const blockedPulse = entry.type === 'blocked' ? 'animation:intentPulse 1.5s infinite;' : '';
+  const urgencyRing = entry.urgency > 0.7 ? 'box-shadow:0 0 0 2px rgba(251,191,36,0.5);' : '';
+
+  return '<div style="background:'+c.bg+';border:'+leadBorder+c.border+';border-radius:8px;padding:8px 10px;margin-bottom:6px;'+(blockedPulse||'')+(urgencyRing||'')+'">'+
+    '<div style="display:flex;align-items:center;gap:6px;margin-bottom:4px;">'+
+      '<span style="width:20px;height:20px;border-radius:50%;background:'+c.border+';display:inline-flex;align-items:center;justify-content:center;font-size:10px;color:white;font-weight:700;">'+(entry.catName||'?')[0]+'</span>'+
+      '<span style="font-size:11px;color:'+c.text+';font-weight:600;">'+crown+(entry.catName||'未知猫')+'</span>'+
+      '<span style="margin-left:auto;font-size:10px;color:rgba(255,255,255,0.3);">'+c.label+'</span>'+
+    '</div>'+
+    '<div style="font-size:12px;color:rgba(255,255,255,0.8);line-height:1.4;">'+(entry.intent||'')+'</div>'+
+    (entry.blockers ? '<div style="font-size:11px;color:#fbbf24;margin-top:4px;">⚠️ '+entry.blockers+'</div>' : '')+
+  '</div>';
+}
+
+function updateIntentionBubbles(intentions) {
+  const list = document.getElementById('intentionBubbleList');
+  const sidebar = document.getElementById('intentionSidebar');
+  const toggle = document.getElementById('intentionToggle');
+  if (!list) return;
+  if (!intentions || intentions.length === 0) {
+    sidebar.style.display = 'none';
+    toggle.style.display = 'none';
+    return;
+  }
+  list.innerHTML = intentions.map(renderIntentionBubble).join('');
+  sidebar.style.display = 'block';
+  toggle.style.display = 'flex';
+  toggle.textContent = '🐾';
+}
+
+window._intentionCache = [];
+
+window.wsIntentionHandler = {
+  onIntentionUpdate: function(entry) {
+    const idx = window._intentionCache.findIndex(function(i){return i.catId===entry.catId&&i.taskId===entry.taskId;});
+    if (idx>=0) window._intentionCache[idx]=entry;
+    else window._intentionCache.push(entry);
+    updateIntentionBubbles(window._intentionCache);
+  },
+  onIntentionCleared: function(data) {
+    if (!window._intentionCache) return;
+    window._intentionCache = window._intentionCache.filter(function(i){
+      return !(i.catId===data.catId&&(data.taskId?i.taskId===data.taskId:true));
+    });
+    updateIntentionBubbles(window._intentionCache);
+  }
+};
+</script>
+<style>
+@keyframes intentPulse {
+  0%,100% { opacity:1; }
+  50% { opacity:0.5; }
+}
+</style>
 </body>
 </html>

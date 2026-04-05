@@ -1,0 +1,21 @@
+# F200-LeadCat 议题库
+# 主导猫从议题库中随机选择话题发起讨论
+# 铲屎官可编辑此文件增删议题
+
+topics:
+  - text: "最近有什么技术趋势值得关注？"
+    category: tech
+  - text: "大家最近在学什么新东西？"
+    category: general
+  - text: "有什么工具或工作流可以改进效率？"
+    category: productivity
+  - text: "代码Review中常见的改进点有哪些？"
+    category: code_quality
+  - text: "这场讨论有什么还没聊透的地方？"
+    category: meta
+  - text: "下一个要做的 feature 是什么？"
+    category: planning
+  - text: "有没有遇到什么技术难题需要群策群力？"
+    category: problem_solving
+  - text: "最近读到了什么有意思的文章或文档？"
+    category: reading

@@ -75,6 +75,13 @@ class ChatSession:
     last_active_cat: Optional[str] = None  # 上一个活跃猫 ID（用于 handoff 链）
     _lock: asyncio.Lock = field(default_factory=asyncio.Lock, repr=False)  # 并发锁
 
+    # F200-LeadCat: 主导猫
+    lead_cat_id: Optional[str] = None          # 当前主导猫 ID
+    lead_cat_verified: bool = False            # 是否经过系统认证
+    lead_cat_votes: Dict[str, str] = field(default_factory=dict)  # voter_id -> voted_cat_id
+    lead_cat_vote_open: bool = False          # 是否正在投票中
+    chain_max_turns: int = 20                # 链式讨论轮数上限（random 5-15）
+
 
 @dataclass
 class ChainExecutionLog:
@@ -128,7 +135,8 @@ class AutonomousChatOrchestrator:
         mode: ChatMode,
         participants: List[Dict],
         topic: str = "",
-        max_turns: int = None
+        max_turns: int = None,
+        lead_cat_id: Optional[str] = None,
     ) -> ChatSession:
         """创建新的聊天会话"""
         if room_id in self.sessions:
@@ -139,11 +147,15 @@ class AutonomousChatOrchestrator:
 
         # 使用环境变量作为默认最大轮数
         actual_max_turns = max_turns or int(os.getenv("MAX_AUTONOMOUS_ROUNDS", "20"))
+        # F200-LeadCat: 链式讨论轮数随机 5-15
+        import random
+        chain_turns = random.randint(5, 15)
         session = ChatSession(
             room_id=room_id,
             mode=mode,
             topic=topic,
-            max_turns=actual_max_turns
+            max_turns=actual_max_turns,
+            chain_max_turns=chain_turns,
         )
 
         # 添加参与者
@@ -161,8 +173,14 @@ class AutonomousChatOrchestrator:
             )
             session.participants[participant.player_id] = participant
 
+        # F200-LeadCat: 主导猫
+        if lead_cat_id and lead_cat_id in session.participants:
+            session.lead_cat_id = lead_cat_id
+            session.lead_cat_verified = True
+            logger.info(f"Lead cat set: {lead_cat_id}")
+
         self.sessions[room_id] = session
-        logger.info(f"Created {mode.value} session in {room_id} with {len(participants)} participants")
+        logger.info(f"Created {mode.value} session in {room_id} with {len(participants)} participants, chain_max_turns={chain_turns}")
 
         return session
 
@@ -214,8 +232,15 @@ class AutonomousChatOrchestrator:
             while session.is_active and session.current_turn < session.max_turns:
                 # 检查空闲超时
                 if (datetime.utcnow() - idle_start).total_seconds() > self.idle_timeout:
-                    logger.info(f"Session {room_id} idle timeout, ending...")
-                    break
+                    # F200-LeadCat: 空闲超时 → 主导猫发起议题
+                    if session.lead_cat_id:
+                        logger.info(f"Session {room_id} idle timeout, lead cat initiating topic...")
+                        await self._lead_cat_initiate_topic(session)
+                        idle_start = datetime.utcnow()  # 重置空闲计时
+                        continue
+                    else:
+                        logger.info(f"Session {room_id} idle timeout, ending...")
+                        break
 
                 # 检查并重置状态机死锁
                 if session.is_processing and session.last_processing_time:
@@ -233,6 +258,11 @@ class AutonomousChatOrchestrator:
                 # 根据模式选择下一个发言人
                 next_speaker = self._select_next_speaker(session)
                 if not next_speaker:
+                    # F200-LeadCat: 没有可发言的猫 → 主导猫发起议题
+                    if session.lead_cat_id and session.mode == ChatMode.FREE_DISCUSSION:
+                        topic_initiated = await self._lead_cat_initiate_topic(session)
+                        if topic_initiated:
+                            idle_start = datetime.utcnow()
                     await asyncio.sleep(2)
                     continue
 
@@ -810,12 +840,178 @@ class AutonomousChatOrchestrator:
         except Exception as e:
             logger.warning(f"[intention][{speaker.player_id}] clear failed: {e}")
 
+    # ──────────────────────────────────────────────────────────────
+    # F200-LeadCat: 主导猫管理
+    # ──────────────────────────────────────────────────────────────
+
+    def set_lead_cat(self, room_id: str, lead_cat_id: str) -> dict:
+        """
+        铲屎官手动指定主导猫。
+        """
+        if room_id not in self.sessions:
+            return {"status": "error", "message": f"No session for {room_id}"}
+
+        session = self.sessions[room_id]
+        if lead_cat_id not in session.participants:
+            return {"status": "error", "message": f"Cat {lead_cat_id} not in session"}
+
+        session.lead_cat_id = lead_cat_id
+        session.lead_cat_verified = True
+        session.lead_cat_votes.clear()
+        session.lead_cat_vote_open = False
+        logger.info(f"[lead-cat] Set by user: {lead_cat_id}")
+        return {
+            "status": "ok",
+            "lead_cat_id": lead_cat_id,
+            "lead_cat_name": session.participants[lead_cat_id].player_name,
+        }
+
+    def open_lead_cat_vote(self, room_id: str) -> dict:
+        """
+        开启主导猫投票（铲屎官不指定时 fallback）。
+        """
+        if room_id not in self.sessions:
+            return {"status": "error", "message": f"No session for {room_id}"}
+
+        session = self.sessions[room_id]
+        session.lead_cat_votes.clear()
+        session.lead_cat_vote_open = True
+        logger.info(f"[lead-cat] Vote opened in {room_id}")
+        return {"status": "ok", "vote_open": True}
+
+    def cast_lead_cat_vote(self, room_id: str, voter_cat_id: str, voted_cat_id: str) -> dict:
+        """
+        主导猫投票：cat 投票给另一个 cat。
+        格式：[VOTE:cat_id]
+        """
+        if room_id not in self.sessions:
+            return {"status": "error", "message": f"No session for {room_id}"}
+
+        session = self.sessions[room_id]
+        if not session.lead_cat_vote_open:
+            return {"status": "error", "message": "Vote not open"}
+
+        if voter_cat_id not in session.participants:
+            return {"status": "error", "message": "Voter not in session"}
+
+        if voted_cat_id not in session.participants:
+            return {"status": "error", "message": "Voted cat not in session"}
+
+        session.lead_cat_votes[voter_cat_id] = voted_cat_id
+        logger.info(f"[lead-cat] Vote: {voter_cat_id} → {voted_cat_id}")
+        return {"status": "ok", "votes": len(session.lead_cat_votes)}
+
+    def tally_lead_cat_vote(self, room_id: str) -> dict:
+        """
+        统计票数并选出主导猫。
+        """
+        if room_id not in self.sessions:
+            return {"status": "error", "message": f"No session for {room_id}"}
+
+        session = self.sessions[room_id]
+        if not session.lead_cat_vote_open:
+            return {"status": "error", "message": "Vote not open"}
+
+        session.lead_cat_vote_open = False
+
+        # 统计得票
+        vote_counts: Dict[str, int] = {}
+        for voted in session.lead_cat_votes.values():
+            vote_counts[voted] = vote_counts.get(voted, 0) + 1
+
+        if not vote_counts:
+            return {"status": "ok", "elected": None, "reason": "no_votes"}
+
+        elected_id = max(vote_counts, key=vote_counts.get)
+        session.lead_cat_id = elected_id
+        session.lead_cat_verified = True
+
+        logger.info(f"[lead-cat] Elected: {elected_id} with {vote_counts[elected_id]} votes")
+        return {
+            "status": "ok",
+            "elected": elected_id,
+            "elected_name": session.participants[elected_id].player_name,
+            "votes": vote_counts,
+        }
+
+    def _select_topic_from_pool(self) -> Optional[str]:
+        """从议题库随机选一个话题"""
+        import random
+        import yaml
+        try:
+            pool_path = Path(__file__).parent.parent.parent / "config" / "topic_pool.yaml"
+            if pool_path.exists():
+                with open(pool_path, encoding="utf-8") as f:
+                    data = yaml.safe_load(f)
+                    topics = data.get("topics", [])
+                    if topics:
+                        return random.choice(topics).get("text")
+        except Exception as e:
+            logger.warning(f"[lead-cat] Failed to load topic pool: {e}")
+        return None
+
+    async def _lead_cat_initiate_topic(self, session: ChatSession) -> Optional[str]:
+        """
+        主导猫发起议题（空闲超时触发）。
+        返回发起的话题文本。
+        """
+        if not session.lead_cat_id:
+            return None
+
+        speaker = session.participants.get(session.lead_cat_id)
+        if not speaker:
+            return None
+
+        topic = self._select_topic_from_pool()
+        if not topic:
+            topic = "大家有什么想讨论的吗？"
+
+        logger.info(f"[lead-cat][{speaker.player_name}] initiating topic: {topic}")
+
+        # 主导猫上报意图
+        await self._report_intention(speaker, "implementing", f"正在发起议题: {topic}")
+
+        try:
+            context = [
+                {"role": "system", "content": (
+                    f"你是{speaker.player_name}，是这场讨论的主导猫。"
+                    "请用一句话简洁地提出一个新话题发起讨论。"
+                    "直接说出话题，不要加前缀或解释。"
+                )},
+                {"role": "user", "content": f"请发起讨论。推荐话题：{topic}"}
+            ]
+            result = await self._call_llm(speaker=speaker, context=context)
+            await self._clear_intention(speaker)
+
+            if result:
+                room = self.bridge.get_or_create_room(session.room_id)
+                room.post_message(
+                    sender_id=speaker.player_id,
+                    sender_name=speaker.player_name,
+                    content=result,
+                    message_type="normal",
+                )
+                speaker.message_count += 1
+                speaker.last_message_time = datetime.utcnow()
+                session.current_turn += 1
+                session.last_active_cat = speaker.player_id
+                return result
+        except Exception as e:
+            logger.error(f"[lead-cat] Failed to initiate topic: {e}")
+            await self._report_intention(speaker, "blocked", f"发起议题失败: {e}", blockers=str(e))
+
+        return None
+
     def get_session_status(self, room_id: str) -> Optional[dict]:
         """获取会话状态"""
         if room_id not in self.sessions:
             return None
 
         session = self.sessions[room_id]
+        lead_cat_name = None
+        if session.lead_cat_id and session.lead_cat_id in session.participants:
+            lead_cat_name = session.participants[session.lead_cat_id].player_name
+
         return {
             "room_id": session.room_id,
             "mode": session.mode.value,
@@ -824,6 +1020,12 @@ class AutonomousChatOrchestrator:
             "is_processing": session.is_processing,
             "current_turn": session.current_turn,
             "max_turns": session.max_turns,
+            "chain_max_turns": session.chain_max_turns,
+            "lead_cat_id": session.lead_cat_id,
+            "lead_cat_name": lead_cat_name,
+            "lead_cat_verified": session.lead_cat_verified,
+            "lead_cat_vote_open": session.lead_cat_vote_open,
+            "vote_count": len(session.lead_cat_votes),
             "participants": [
                 {
                     "player_id": p.player_id,

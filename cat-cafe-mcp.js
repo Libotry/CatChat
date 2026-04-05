@@ -347,6 +347,47 @@ server.tool(
   }
 );
 
+// ============ F200-LeadCat: 主导猫投票 (vote_lead_cat) ============
+// 猫猫通过此工具投票给主导猫候选人
+// 调用 CatChat FastAPI (CAT_CHAT_API_URL)，端口默认 8000
+const CAT_CHAT_API_URL = process.env.CAT_CHAT_API_URL || 'http://localhost:8000';
+
+server.tool(
+  'cat_cafe_vote_lead_cat',
+  '投票给主导猫候选人（仅在投票开启时有效）',
+  {
+    roomId: z.string().describe('房间 ID'),
+    votedCatId: z.string().describe('被投票的猫 ID'),
+  },
+  async ({ roomId, votedCatId }) => {
+    try {
+      // 从环境变量获取当前猫的 ID（由 cat runner 在启动时注入）
+      const catId = process.env.CAT_CHAT_CAT_ID;
+      if (!catId) {
+        return { content: [{ type: 'text', text: '❌ CAT_CHAT_CAT_ID not set' }], isError: true };
+      }
+
+      const response = await fetch(`${CAT_CHAT_API_URL}/api/chat/sessions/${roomId}/lead-cat/vote`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          voter_cat_id: catId,
+          voted_cat_id: votedCatId,
+        })
+      });
+
+      if (!response.ok) {
+        const err = await response.text();
+        return { content: [{ type: 'text', text: `❌ Vote failed: ${err}` }], isError: true };
+      }
+      const result = await response.json();
+      return { content: [{ type: 'text', text: `✅ Vote cast for ${votedCatId} (${result.votes} votes total)` }] };
+    } catch (error) {
+      return { content: [{ type: 'text', text: `❌ Failed: ${error.message}` }], isError: true };
+    }
+  }
+);
+
 // 启动服务器
 async function main() {
   const transport = new StdioServerTransport();

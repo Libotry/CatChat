@@ -2,12 +2,12 @@
 const catEmojis = ['🐱','😺','😸','😹','😻','😼','😽','🙀','😿','😾','🐈','🐈‍⬛','🐾','🦁'];
 const catColors = ['#f582ae','#ff8c42','#ffd803','#a8d8a8','#8bd3dd','#b8a9c9','#f6a6b2','#ffb347','#87ceeb','#dda0dd','#98d8c8','#f7dc6f'];
 const CAT_BREED_AVATARS = [
-    { breed:'英国短毛猫', icon:'🐱', imageUrl:'https://loremflickr.com/320/320/cat-face,closeup,portrait,british-shorthair?lock=101' },
-    { breed:'美国短毛猫', icon:'🐱', imageUrl:'https://loremflickr.com/320/320/cat-face,closeup,portrait,american-shorthair?lock=102' },
-    { breed:'布偶猫', icon:'🐱', imageUrl:'https://loremflickr.com/320/320/cat-face,closeup,portrait,ragdoll?lock=103' },
-    { breed:'暹罗猫', icon:'🐱', imageUrl:'https://loremflickr.com/320/320/cat-face,closeup,portrait,siamese?lock=104' },
+    { breed:'英国短毛猫', icon:'🐱', imageUrl:'https://loremflickr.com/320/320/cat-face,closeup,portrait,british-shorthair?lock=101', name:'团子' },
+    { breed:'美国短毛猫', icon:'🐱', imageUrl:'https://loremflickr.com/320/320/cat-face,closeup,portrait,american-shorthair?lock=102', name:'年糕' },
+    { breed:'布偶猫', icon:'🐱', imageUrl:'https://loremflickr.com/320/320/cat-face,closeup,portrait,ragdoll?lock=103', name:'奶糖' },
+    { breed:'暹罗猫', icon:'🐱', imageUrl:'https://loremflickr.com/320/320/cat-face,closeup,portrait,siamese?lock=104', name:'墨璃' },
     { breed:'波斯猫', icon:'🐱', imageUrl:'https://loremflickr.com/320/320/cat-face,closeup,portrait,persian-cat?lock=105' },
-    { breed:'缅因猫', icon:'🐱', imageUrl:'https://loremflickr.com/320/320/cat-face,closeup,portrait,maine-coon?lock=106' },
+    { breed:'缅因猫', icon:'🐱', imageUrl:'https://loremflickr.com/320/320/cat-face,closeup,portrait,maine-coon?lock=106', name:'雷欧' },
     { breed:'挪威森林猫', icon:'🐱', imageUrl:'https://loremflickr.com/320/320/cat-face,closeup,portrait,norwegian-forest-cat?lock=107' },
     { breed:'俄罗斯蓝猫', icon:'🐱', imageUrl:'https://loremflickr.com/320/320/cat-face,closeup,portrait,russian-blue?lock=108' },
     { breed:'孟加拉猫', icon:'🐱', imageUrl:'https://loremflickr.com/320/320/cat-face,closeup,portrait,bengal-cat?lock=109' },
@@ -60,7 +60,7 @@ let wfState = {
     hideNightRoleForAudience:true
 };
 let wfAutoAdvanceTimer = null;
-let plState = { active:false, phase:'idle', requirement:'', outputDir:'', timeoutMs:0, roles:{}, results:{}, useClaudeCodeCli:false };
+let plState = { active:false, phase:'idle', requirement:'', outputDir:'', timeoutMs:0, roles:{}, results:{}, useClaudeCodeCli:false, mood:3 };
 let cliProxy = { enabled: false, url: 'http://localhost:3456', connected: false };
 let dbState = { active:false, round:0, maxRounds:2, turnIndex:0, order:[], queue:[], speaking:false };
 let monitorState = {
@@ -1236,7 +1236,8 @@ function monitorSyncPlayerCountFromCats() {
 function renderEmojiPicker() {
     document.getElementById('emojiPicker').innerHTML = CAT_BREED_AVATARS.map(function(item, i) {
         var selected = (item.breed === selectedBreed) ? 'selected' : '';
-        return '<div class="emoji-option ' + selected + '" onclick="selectEmoji(' + i + ',this)"><div style="font-size:36px;line-height:1;">' + escapeHtml(item.icon) + '</div><div class="emoji-label">' + escapeHtml(item.breed) + '</div></div>';
+        var displayName = item.name ? item.breed + ' ' + item.name : item.breed;
+        return '<div class="emoji-option ' + selected + '" onclick="selectEmoji(' + i + ',this)"><div style="font-size:36px;line-height:1;">' + escapeHtml(item.icon) + '</div><div class="emoji-label">' + escapeHtml(displayName) + '</div></div>';
     }).join('');
 }
 function selectEmoji(index, el) {
@@ -1251,8 +1252,9 @@ function selectEmoji(index, el) {
     if (!nameInput) return;
     var current = (nameInput.value || '').trim();
     var autoFilled = nameInput.dataset.autoFilledName === '1';
+    var defaultName = item.name || item.breed;
     if (!current || autoFilled) {
-        nameInput.value = item.breed;
+        nameInput.value = defaultName;
         nameInput.dataset.autoFilledName = '1';
     }
 
@@ -2107,6 +2109,8 @@ function pipelineStart() {
             ? syncData.agents.map(function(a) { return String(a.catName || a.catId || 'cat') + ':' + String(a.port || '-'); }).join(' / ')
             : cats.map(function(cat) { return cat.name + ':' + normalizePipelineCliPort(cat.pipelineCliPort, 3460); }).join(' / ');
 
+        var moodVal = 3;
+        try { moodVal = parseInt(document.getElementById('ppMoodSlider').value) || 3; } catch(_) {}
         plState = {
             active: true,
             phase: 'dev',
@@ -2115,7 +2119,8 @@ function pipelineStart() {
             timeoutMs: 0,
             useClaudeCodeCli: true,
             roles: roles,
-            results: {}
+            results: {},
+            mood: moodVal
         };
         document.getElementById('ppResetBtn').disabled = false;
         renderMembers();
@@ -2125,6 +2130,7 @@ function pipelineStart() {
         addSystemMessage('📁 输出目录：' + outputDir, 'pipeline-msg');
         addSystemMessage('🔀 模型切换：' + roleSwitchSummary, 'pipeline-msg');
         addSystemMessage('🧩 专属 CLI 端口：' + portSummary, 'pipeline-msg');
+        addSystemMessage('🎭 猫猫松弛度：' + (PIPELINE_MOOD_PRESETS[moodVal] || PIPELINE_MOOD_PRESETS[3]).label + '（等级 ' + moodVal + '/5）', 'pipeline-msg');
         addSystemMessage('🤖 Claude Code CLI 手动多窗口模式：请确保每只猫已手动运行 node cat_chat_cli.js --port <端口>。', 'pipeline-msg');
         addSystemMessage('🛠️ 阶段一：' + plState.roles.developer.emoji + ' ' + plState.roles.developer.name + ' 正在进行模块设计与代码开发...', 'pipeline-dev-msg');
         var devCat = plState.roles.developer;
@@ -2144,12 +2150,50 @@ function pipelineStart() {
     });
 }
 
+var PIPELINE_MOOD_PRESETS = {
+    1: { label:'严肃', desc:'纯专业输出，无任何个性化内容',
+         chatHint: '不要使用猫猫语气、寒暄或角色扮演。',
+         pipeHint: '使用中文，不要加入任何个性化语气、寒暄或玩笑。',
+         personality: false },
+    2: { label:'克制', desc:'偶尔一句轻松点评，整体保持专业',
+         chatHint: '可以偶尔加一句轻松的点评，但整体保持专业。',
+         pipeHint: '允许在开头或结尾加一句简短的轻松点评（不超过 1 句），其余内容保持严谨专业。',
+         personality: true },
+    3: { label:'均衡', desc:'任务优先，偶尔加入猫猫风格点评',
+         chatHint: '可以带猫猫个性回答，但准确回答问题是第一优先级。',
+         pipeHint: '允许在段落衔接处加入 1-2 句个性化点评或吐槽（幽默、鼓励等），但不要喧宾夺主。必须以任务结论收尾，不要以闲聊结尾。',
+         personality: true },
+    4: { label:'活泼', desc:'积极展现猫猫性格，任务内容穿插个性表达',
+         chatHint: '用猫猫的个性和口吻回答，技术内容仍需准确。',
+         pipeHint: '积极展现你的猫猫性格，在段落间穿插个性化表达（感叹、吐槽、玩梗），每段可加 1-2 句。代码块和技术结论本身必须准确，但解读和过渡语句请充分展现个性。',
+         personality: true },
+    5: { label:'放飞', desc:'全程猫猫角色扮演，高能社交输出',
+         chatHint: '完全用猫猫身份说话，尽情展现个性，但别忘了回答问题。',
+         pipeHint: '全程以猫猫身份输出！开篇来一段猫猫式的独白或吐槽，过程中随意穿插玩笑、八卦和个性表达。技术内容（代码、检视、测试用例）必须正确，但表达方式完全放飞。结尾也用猫猫风格收场。',
+         personality: true }
+};
+
+function pipelineUpdateMoodLabel(val) {
+    var v = parseInt(val) || 3;
+    var preset = PIPELINE_MOOD_PRESETS[v] || PIPELINE_MOOD_PRESETS[3];
+    var labelEl = document.getElementById('ppMoodLabel');
+    var descEl = document.getElementById('ppMoodDesc');
+    if (labelEl) labelEl.textContent = preset.label;
+    if (descEl) descEl.textContent = preset.desc;
+}
+
 function buildPipelineClaudePrompt(cat, chatPayload, phase) {
     var msgs = Array.isArray(chatPayload.messages) ? chatPayload.messages : [];
     var workDir = pipelineResolveWorkDir();
     var workDirHint = workDir
         ? ['【工作目录】', workDir, '', '权限说明：你已被授权在该目录及其子目录内进行读取、写入、创建、修改、删除与命令执行。后续对话默认以该目录为工作目录。', '授权执行规则：无需向铲屎官二次确认授权；不要输出“需要在编辑器中授权/请先授权/等待授权”等表述；在工作目录权限范围内应直接实施修改并给出结果。', ''].join('\n')
         : '';
+    var mood = (plState && plState.mood) ? plState.mood : 3;
+    var moodPreset = PIPELINE_MOOD_PRESETS[mood] || PIPELINE_MOOD_PRESETS[3];
+    var personalityHint = '';
+    if (moodPreset.personality && cat && cat.personality) {
+        personalityHint = '【你的性格】\n' + cat.personality + '\n请以你的性格特点完成任务，但任务质量是第一优先级。\n';
+    }
     if (phase === 'chat') {
         var latestUser = '';
         for (var i = msgs.length - 1; i >= 0; i--) {
@@ -2163,6 +2207,7 @@ function buildPipelineClaudePrompt(cat, chatPayload, phase) {
         }).join('\n\n');
         return [
             '你是技术助手，请直接回答用户问题。',
+            personalityHint,
             workDirHint,
             '',
             '【当前用户问题】',
@@ -2173,7 +2218,7 @@ function buildPipelineClaudePrompt(cat, chatPayload, phase) {
             '',
             '回复要求：',
             '1) 优先准确回答“当前用户问题”。',
-            '2) 不要使用猫猫语气、寒暄或角色扮演。',
+            '2) ' + moodPreset.chatHint,
             '3) 使用 Markdown 输出（可用标题、要点、示例、代码块）。',
             '4) 重点解释问题本质与关键原理，必要时可适当展开。',
             '5) 不要输出流程说明或额外前后缀。'
@@ -2188,6 +2233,7 @@ function buildPipelineClaudePrompt(cat, chatPayload, phase) {
         '你现在在 CatChat 的代码流水线中执行任务，请直接输出该阶段结果。',
         '执行者: ' + (cat && cat.name ? cat.name : '未命名执行者'),
         '阶段: ' + (phaseMap[phase] || phase),
+        personalityHint,
         workDirHint,
         '',
         '【系统设定】',
@@ -2197,9 +2243,9 @@ function buildPipelineClaudePrompt(cat, chatPayload, phase) {
         dialog,
         '',
         '输出要求：',
-        '1) 只输出阶段结果正文，不要加解释性前后缀。',
+        '1) 先输出阶段结果正文（代码、报告等），这是核心内容。',
         '2) 使用 Markdown 结构化输出（标题/清单/代码块按需使用）。',
-        '3) 使用中文，避免猫猫语气与寒暄。',
+        '3) ' + moodPreset.pipeHint,
         '4) 尽量精炼，优先给结论与关键点，避免冗长。'
     ].join('\n');
 }
@@ -2928,7 +2974,10 @@ function addCatMessage(cat, text, isNight, replyTo) {
             '</div>';
     }
 
-    d.innerHTML = '<div class="message-avatar" style="background:linear-gradient(135deg,' + cat.color + ',' + adjustColor(cat.color, -20) + ');" onmouseenter="showCatTooltip(\'' + cat.id + '\',event)" onmouseleave="hideCatTooltip()">' + catAvatarHtml(cat) + '</div><div class="message-content"><div class="message-sender">' + escapeHtml(cat.name) + nightLabel + senderRoleHtml + '</div>' + replyHtml + '<div class="message-bubble" data-real="' + escapeHtml(text) + '">' + displayText + '</div><div class="message-time">' + getTimeStr() + '</div></div>';
+    // F200-LeadCat: 👑 主导猫标识
+    var leadCatPrefix = (window.currentLeadCatId && window.currentLeadCatId === cat.id) ? '👑 ' : '';
+
+    d.innerHTML = '<div class="message-avatar" style="background:linear-gradient(135deg,' + cat.color + ',' + adjustColor(cat.color, -20) + ');' + (window.currentLeadCatId && window.currentLeadCatId === cat.id ? 'border:2px solid #f59e0b;' : '') + '" onmouseenter="showCatTooltip(\'' + cat.id + '\',event)" onmouseleave="hideCatTooltip()">' + catAvatarHtml(cat) + '</div><div class="message-content"><div class="message-sender">' + leadCatPrefix + escapeHtml(cat.name) + nightLabel + senderRoleHtml + '</div>' + replyHtml + '<div class="message-bubble" data-real="' + escapeHtml(text) + '">' + displayText + '</div><div class="message-time">' + getTimeStr() + '</div></div>';
 
     document.getElementById('chatMessages').appendChild(d);
     if (werewolfShouldHideNightRoleBadge(isNight)) {
@@ -3054,7 +3103,13 @@ function autoChatPickRandomCat(excludeId) {
 }
 
 function autoChatBuildPrompt(cat, trigger) {
+    var otherNames = cats.filter(function(c) { return c.id !== cat.id; }).map(function(c) { return c.name; });
     var base = cat.personality + '\n\n【聊天室规则】\n- 你在一个有多只猫猫和铲屎官的聊天室里。\n- 请用简短自然的口吻说话（15-60字左右）。\n- 可以用"喵"等语气词，但不要每句话都用。\n- 保持自己的性格特点。';
+    if (otherNames.length > 0) {
+        base += '\n- 聊天室里的其他猫猫：' + otherNames.join('、');
+        base += '\n- 如果想让某只猫接话或参与讨论，在新的一行开头写 @猫名（例如 @' + otherNames[0] + ' 你觉得呢？）';
+        base += '\n- 不需要别的猫参与时就不要写 @';
+    }
 
     if (trigger === 'idle') {
         base += '\n\n【当前情况】\n聊天室安静了一会儿。你作为一只有自主意识的猫猫，现在想主动说点什么。';
@@ -3108,12 +3163,54 @@ function autoChatTriggerIdle() {
     }
 }
 
+// 从猫猫回复中解析行首 @mention，返回被 mention 的猫（用于链式接力）
+function autoChatParseA2AMentions(text, sourceCatId) {
+    if (!text || cats.length === 0) return [];
+    // 去除 fenced code blocks
+    var cleaned = text.replace(/```[\s\S]*?```/g, '');
+    // 匹配行首 @mention
+    var mentionRe = /^\s*@(\S+)/gm;
+    var match, mentioned = [], seenIds = {};
+    // 按名字长度降序排列，最长优先匹配
+    var sortedCats = cats.slice().sort(function(a, b) { return b.name.length - a.name.length; });
+    while ((match = mentionRe.exec(cleaned)) !== null) {
+        var raw = match[1];
+        for (var i = 0; i < sortedCats.length; i++) {
+            var c = sortedCats[i];
+            if (raw === c.name || raw.indexOf(c.name) === 0) {
+                if (c.id !== sourceCatId && !seenIds[c.id]) {
+                    seenIds[c.id] = true;
+                    mentioned.push(c);
+                }
+                break;
+            }
+        }
+        if (mentioned.length >= 3) break;
+    }
+    return mentioned;
+}
+
 function autoChatMaybeReact(sourceCat, sourceReply) {
     if (!autoChat.enabled || gameMode !== 'discuss') return;
     if (autoChat.consecutiveAuto >= autoChat.maxConsecutive) return;
     if (cats.length < 2) return;
 
     autoChatReadUISettings();
+
+    // 优先解析 @mention 指定的猫（A2A 链式接力）
+    var mentionedCats = autoChatParseA2AMentions(sourceReply, sourceCat.id);
+    if (mentionedCats.length > 0) {
+        // 有明确 @mention —— 100% 触发被点名的猫，不受 reactChance 概率控制
+        mentionedCats.forEach(function(reactCat, idx) {
+            var delay = 1500 + idx * 2000 + Math.random() * 2000;
+            setTimeout(function() {
+                autoChatTriggerReactForCat(reactCat, sourceCat);
+            }, delay);
+        });
+        return;
+    }
+
+    // 没有 @mention —— 走原有的随机概率接话逻辑
     if (Math.random() > autoChat.reactChance) return;
 
     var reactCat = autoChatPickRandomCat(sourceCat.id);
@@ -3121,40 +3218,45 @@ function autoChatMaybeReact(sourceCat, sourceReply) {
 
     var delay = 3000 + Math.random() * 8000;
     setTimeout(function() {
-        if (!autoChat.enabled || autoChat.reacting) return;
-        if (autoChat.consecutiveAuto >= autoChat.maxConsecutive) return;
-
-        autoChat.reacting = true;
-        var systemPrompt = autoChatBuildPrompt(reactCat, 'react');
-        var recentMsgs = messages.slice(-10).map(function(m) {
-            return { role: m.name === reactCat.name ? 'assistant' : 'user', content: '[' + m.name + ']: ' + m.content };
-        });
-        var payload = { system: systemPrompt, messages: recentMsgs };
-
-        addThinkingIndicator(reactCat);
-        var done = function(result) {
-            removeThinkingIndicator(reactCat.id);
-            autoChat.reacting = false;
-            var reply = (result && typeof result === 'object') ? String(result.reply || '').trim() : String(result || '').trim();
-            if (reply) {
-                var el = addCatMessage(reactCat, reply, false);
-                messages.push({ role: 'assistant', name: reactCat.name, content: reply, id: el ? el.dataset.messageId : undefined });
-                autoChat.consecutiveAuto++;
-                autoChat.lastActivityTime = Date.now();
-                autoChatMaybeReact(reactCat, reply);
-            }
-        };
-        var fail = function(err) {
-            removeThinkingIndicator(reactCat.id);
-            autoChat.reacting = false;
-            console.error('[AutoChat] react trigger error:', err);
-        };
-        if (catUsesClaudeFormat(reactCat)) {
-            callClaudeAPI(reactCat, payload).then(done).catch(fail);
-        } else {
-            callOpenAIAPI(reactCat, payload).then(done).catch(fail);
-        }
+        autoChatTriggerReactForCat(reactCat, sourceCat);
     }, delay);
+}
+
+// 提取出的通用猫猫接话执行函数（被 @mention 触发或随机触发共用）
+function autoChatTriggerReactForCat(reactCat, sourceCat) {
+    if (!autoChat.enabled || autoChat.reacting) return;
+    if (autoChat.consecutiveAuto >= autoChat.maxConsecutive) return;
+
+    autoChat.reacting = true;
+    var systemPrompt = autoChatBuildPrompt(reactCat, 'react');
+    var recentMsgs = messages.slice(-10).map(function(m) {
+        return { role: m.name === reactCat.name ? 'assistant' : 'user', content: '[' + m.name + ']: ' + m.content };
+    });
+    var payload = { system: systemPrompt, messages: recentMsgs };
+
+    addThinkingIndicator(reactCat);
+    var done = function(result) {
+        removeThinkingIndicator(reactCat.id);
+        autoChat.reacting = false;
+        var reply = (result && typeof result === 'object') ? String(result.reply || '').trim() : String(result || '').trim();
+        if (reply) {
+            var el = addCatMessage(reactCat, reply, false);
+            messages.push({ role: 'assistant', name: reactCat.name, content: reply, id: el ? el.dataset.messageId : undefined });
+            autoChat.consecutiveAuto++;
+            autoChat.lastActivityTime = Date.now();
+            autoChatMaybeReact(reactCat, reply);
+        }
+    };
+    var fail = function(err) {
+        removeThinkingIndicator(reactCat.id);
+        autoChat.reacting = false;
+        console.error('[AutoChat] react trigger error:', err);
+    };
+    if (catUsesClaudeFormat(reactCat)) {
+        callClaudeAPI(reactCat, payload).then(done).catch(fail);
+    } else {
+        callOpenAIAPI(reactCat, payload).then(done).catch(fail);
+    }
 }
 
 // ====================== Send Message ======================
@@ -4385,6 +4487,12 @@ function autoChatConnectWs(roomId) {
                 var el = addCatMessage(cat, content, false);
                 messages.push({ role: 'assistant', name: cat.name, content: content, id: el ? el.dataset.messageId : undefined });
 
+            } else if (evt === 'lead_cat_update') {
+                // F200-LeadCat: 主导猫身份更新
+                window.currentLeadCatId = payload.lead_cat_id || null;
+                if (payload.lead_cat_name) {
+                    showToast('👑 主导猫已指定: ' + payload.lead_cat_name);
+                }
             } else if (evt === 'chat_history') {
                 // 历史消息批量渲染（去重）
                 var list = (payload.messages || []);
